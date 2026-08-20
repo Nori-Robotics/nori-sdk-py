@@ -14,8 +14,11 @@ from typing import Any
 
 from ..version import NORI_PROTOCOL_VERSION
 
-# A small two-arm robot, shaped like an L3: the descriptor a client sees drives everything
-# it can do, so tests that use this are testing descriptor-driven behavior for real.
+# A small two-arm robot with L2-SHAPED arms (5 DOF a side). The descriptor a client sees
+# drives everything it can do, so tests using this are testing descriptor-driven behaviour
+# for real. L2 rather than A3 on purpose: the 5-DOF arm is the legacy shape still in the
+# field, and a client that works against the smaller descriptor works against the larger.
+# Pass your own `descriptor=` to model an A3 (7 DOF a side, one central lift).
 DEFAULT_DESCRIPTOR: dict[str, Any] = {
     "buses": ["left", "right"],
     "joints": [
@@ -67,8 +70,18 @@ class MockRobot:
         protocol_version: int = NORI_PROTOCOL_VERSION,
         on_send: Callable[[str], None] | None = None,
         action_outcome: str = "done",
+        tiles: list[str] | None = None,
     ) -> None:
         self.descriptor = descriptor
+        # The composite video tiling this robot will ANNOUNCE. Defaults to the descriptor's
+        # camera list because that is the common case, but it is a separate input on purpose
+        # -- see _layout(). Pass it explicitly to rehearse a layout that disagrees with the
+        # descriptor, which is a real thing robots do and a client must not assume away.
+        self.tiles = (
+            list(tiles)
+            if tiles is not None
+            else list((descriptor or {}).get("cameras", []) if descriptor else [])
+        )
         self.online = online
         self.cameras = cameras
         self.accepted = accepted
@@ -216,8 +229,16 @@ class MockRobot:
         return ack
 
     def _layout(self) -> dict[str, Any]:
-        tiles = (self.descriptor or {}).get("cameras", []) if self.descriptor else []
-        return {"type": "camera_layout", "cols": 2, "rows": 2, "tiles": list(tiles)}
+        """The composite tiling.
+
+        Derived from `self.tiles`, NOT from descriptor.cameras. The schema calls this out
+        directly: the layout frame is the only authoritative description of the tiling, and
+        descriptor.cameras is diagnostic metadata that may legitimately differ. A mock that
+        generates one from the other can never fail the way a real robot does, so it hides
+        exactly the layout bugs it exists to catch. Set `tiles` to rehearse a disagreement."""
+        cols = 2 if len(self.tiles) > 1 else 1
+        rows = max(1, -(-len(self.tiles) // cols))  # ceil, so no tile falls off the grid
+        return {"type": "camera_layout", "cols": cols, "rows": rows, "tiles": list(self.tiles)}
 
     def _daemon_status(self) -> dict[str, Any]:
         if self.online:

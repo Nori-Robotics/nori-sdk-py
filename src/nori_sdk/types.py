@@ -142,6 +142,17 @@ class RobotInfo:
     error: str | None = None
     version_mismatch: bool = False
 
+    # ADVISORY ONLY: a label for logs, dataset provenance and bug reports ("L2", "A3"). Never
+    # branch behaviour on it — branch on `descriptor` and `capabilities`, so a model this SDK
+    # has never heard of works against an unmodified client. Absent on older robots.
+    model: str | None = None
+
+    # None means the robot did not tell us — NOT "supports nothing". The distinction is load-
+    # bearing: an empty list is a robot explicitly declaring no optional verbs, while None is
+    # a robot predating the field, which must be probed or assumed legacy. Collapsing the two
+    # would make every legacy robot look like it supports nothing at all.
+    capabilities: list[str] | None = None
+
     @classmethod
     def from_wire(
         cls, obj: dict[str, Any], sdk_protocol_version: int = NORI_PROTOCOL_VERSION
@@ -150,6 +161,10 @@ class RobotInfo:
         # counts as accepted, everything else is optional.
         pv = obj.get("protocol_version")
         protocol_version = int(pv) if isinstance(pv, int) and not isinstance(pv, bool) else None
+        raw_caps = obj.get("capabilities")
+        capabilities = (
+            [c for c in raw_caps if isinstance(c, str)] if isinstance(raw_caps, list) else None
+        )
         return cls(
             accepted=obj.get("accepted") is not False,
             protocol_version=protocol_version,
@@ -161,7 +176,25 @@ class RobotInfo:
             version_mismatch=(
                 protocol_version is not None and protocol_version != sdk_protocol_version
             ),
+            model=_s(obj, "model"),
+            capabilities=capabilities,
         )
+
+    def supports(self, capability: str) -> bool | None:
+        """Does this robot honour an optional verb? True / False / None for "it didn't say".
+
+        Three-valued on purpose. A robot predating the capabilities field reports None, and a
+        caller must decide whether to probe or assume legacy — folding that into False would
+        silently disable working features on every older robot in the fleet. An unrecognised
+        capability name is not an error; treat it as one this SDK does not model.
+
+        Known values: task_jog, leader_action_deg, lift_targets, record, policy_stream, call,
+        perception. The list is a UNION built along the path — a daemon lists what it honours
+        and a bridge appends what it adds on top — so never infer WHICH component provides a
+        capability from the fact that it is present."""
+        if self.capabilities is None:
+            return None
+        return capability in self.capabilities
 
 
 # --- periodic state ----------------------------------------------------------------------
@@ -225,15 +258,23 @@ class CameraLayout:
 
     @classmethod
     def from_wire(cls, obj: dict[str, Any]) -> CameraLayout | None:
+        """None means REJECT this frame and keep whatever layout you already had.
+
+        A layout with no tiles is invalid per the schema, and adopting one would blank the
+        grid for the rest of the session — the robot repeats the layout several times on
+        open, so a single malformed repeat must not be able to poison a good one. Note this
+        is the opposite of an ABSENT layout, which is how a single-camera robot says "the
+        whole frame is the one camera"."""
         cols, rows = obj.get("cols"), obj.get("rows")
         if not isinstance(cols, int) or not isinstance(rows, int) or cols < 1 or rows < 1:
             return None
-        tiles = obj.get("tiles")
-        return cls(
-            cols=cols,
-            rows=rows,
-            tiles=[t for t in tiles if isinstance(t, str)] if isinstance(tiles, list) else [],
-        )
+        raw_tiles = obj.get("tiles")
+        if not isinstance(raw_tiles, list):
+            return None
+        tiles = [t for t in raw_tiles if isinstance(t, str)]
+        if not tiles:
+            return None
+        return cls(cols=cols, rows=rows, tiles=tiles)
 
     def rect(self, role: str) -> tuple[float, float, float, float] | None:
         """Normalized (x, y, w, h) of one camera's tile within the composite frame, or None
@@ -330,6 +371,47 @@ class ActionStatus:
             state=_s(obj, "state") or "",
             reason=_s(obj, "reason"),
             ts_ns=int(ts) if isinstance(ts, int) and not isinstance(ts, bool) else 0,
+        )
+
+
+# `error` codes that are NOT failures: the robot telling you a previous fault has cleared.
+# Surprising enough to be worth a constant -- an "error" frame saying arm_recovered arriving
+# as a red banner is a bug that ships easily.
+RECOVERY_ERROR_CODES = frozenset(
+    {"obstruction_cleared", "arm_recovered", "motor_recovered"}
+)
+
+
+@dataclass(frozen=True)
+class RobotError:
+    """An `error` frame. `fatal=True` ends the session; everything else is a notice.
+
+    `code` is an OPEN set — newer robots add codes freely, so never switch exhaustively on it
+    and never gate display on recognising it. Show `msg`, which is written for an operator.
+
+    Not every error is a failure. `obstruction` is a soft stall: torque drops on one joint and
+    clears when you jog away from whatever it hit. And three codes are recoveries — see
+    RECOVERY_ERROR_CODES — so a client that renders every `error` frame as a fault will show a
+    red banner for the news that the fault went away."""
+
+    code: str = ""
+    msg: str = ""
+    fatal: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def recovered(self) -> bool:
+        """This frame reports a fault CLEARING, not a new one."""
+        return self.code in RECOVERY_ERROR_CODES
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> RobotError:
+        return cls(
+            code=_s(obj, "code") or "",
+            msg=_s(obj, "msg") or "",
+            # Absent means false, per the schema default.
+            fatal=obj.get("fatal") is True,
+            raw=dict(obj),
         )
 
 
@@ -441,6 +523,7 @@ class ConnectStatus:
 
 
 __all__ = [
+    "RECOVERY_ERROR_CODES",
     "TERMINAL_ACTION_STATES",
     "ActionStatus",
     "ArmSide",
@@ -454,6 +537,7 @@ __all__ = [
     "PolicyStreamStatus",
     "RecordState",
     "RobotDescriptor",
+    "RobotError",
     "RobotInfo",
     "SafetyState",
     "Telemetry",

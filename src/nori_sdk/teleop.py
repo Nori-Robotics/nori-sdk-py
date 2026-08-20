@@ -8,7 +8,7 @@ loop.
     from nori_sdk import RemoteTeleop, SupabaseSignaling, UserAuth
 
     auth = UserAuth(URL, ANON, "me@example.com", "pw")
-    sig = SupabaseSignaling(URL, ANON, room="NORI-L3-0001", token_provider=auth.token)
+    sig = SupabaseSignaling(URL, ANON, room="NORI-A3-0001", token_provider=auth.token)
 
     async with RemoteTeleop(sig) as robot:
         await robot.wait_ready()

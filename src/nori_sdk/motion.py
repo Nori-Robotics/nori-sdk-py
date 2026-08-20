@@ -3,7 +3,7 @@ you are actually connected to.
 
 The lesson from the TypeScript side is here in the negative: over there the DOF vocabulary
 got re-derived in four separate places (the SDK's key tables, robot-ops, the script driver,
-and the app's own keymap), and adding the L3 arm meant finding all of them. So this module
+and the app's own keymap), and adding the 7-DOF arm meant finding all of them. So this module
 hard-codes NO joint names. Everything derives from RobotInfo.descriptor, which the robot
 sends in its `ack`, and a robot with joints this SDK has never heard of works unchanged.
 

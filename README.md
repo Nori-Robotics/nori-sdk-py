@@ -48,8 +48,9 @@ double has to punish it here rather than let hardware do it. It also integrates 
 telemetry responds to what you commanded.
 
 **What a green mock run does not prove:** ICE, TURN, bandwidth, video, or real timing. It
-means your logic is right, not that your network is. Also unmodelled: `perception` and
-`error` frames, motor faults, thermals, and a daemon that goes offline mid-session.
+means your logic is right, not that your network is. Also not produced by the mock:
+`perception` and `error` frames (both are modelled and parse — the double just never
+emits them), motor faults, thermals, and a daemon that goes offline mid-session.
 
 ## Quickstart (against a robot)
 
@@ -61,7 +62,7 @@ from nori_sdk.motion import JogBuilder
 async def main():
     auth = UserAuth(SUPABASE_URL, ANON_KEY, "me@example.com", "password")
     signaling = SupabaseSignaling(
-        SUPABASE_URL, ANON_KEY, room="NORI-L3-0001", token_provider=auth.token
+        SUPABASE_URL, ANON_KEY, room="NORI-A3-0001", token_provider=auth.token
     )
 
     async with RemoteTeleop(signaling) as robot:
@@ -109,7 +110,8 @@ protocol, not implementation detail.
 
 **Nothing is hard-coded per robot model.** Joints, base DOFs, lifts, cameras and ranges all
 come from the `ack` descriptor. The TypeScript side learned this the hard way: its DOF
-vocabulary ended up re-derived in four places, so adding the L3 arm meant finding all of them.
+vocabulary ended up re-derived in four places, so adding the 7-DOF arm meant finding all
+of them.
 
 **Failures are named.** `ConnectStatus.failure` distinguishes `signaling_unreachable`,
 `robot_absent`, `session_rejected`, `negotiation_failed` and `ice_failed`, so a script can log
@@ -162,17 +164,17 @@ submodule initialised can still run everything else.
 Known divergences are marked `xfail(strict=True)` with a reason naming the consequence — not
 deleted, and not left red. The suite stays green, each gap is documented where it will be
 found, and the moment somebody fixes one the test XPASSes and *fails the build*, forcing the
-marker off. A self-retiring TODO list. There are currently **4**; each is a real bug in this
-SDK, not a spec disagreement: the missing legacy `record` verb aliases, unmodelled `error`
-frames, a tile-less `camera_layout` being accepted, and `model`/`capabilities` absent from
-`RobotInfo`.
+marker off. A self-retiring TODO list — and it is currently **empty**. All eight divergences
+have been fixed; each former `xfail` is now an ordinary test guarding the fix, kept rather
+than deleted because the consequence each one documents is the part worth preserving.
 
-Four more have been retired. They shared a shape worth naming, because it is the one this
-policy exists to catch: each made the SDK **report success while doing something else** — a
-base jog that was silently a full stop, a completed action that had not happened, a malformed
-policy reply that read as a running stream, and a healthy robot reported offline. None would
-have surfaced as an error anywhere. A fix here is not considered done until a mutation
-reverting it fails exactly one named test.
+They shared a shape worth naming, because it is the one this policy exists to catch: each
+made the SDK **report success while doing something else** — a base jog that was silently a
+full stop, a completed action that had not happened, a malformed policy reply that read as a
+running stream, a healthy robot reported offline, a fatal error arriving as an untyped dict,
+one bad repeat blanking a good camera layout. None would have surfaced as an error anywhere.
+A fix here is not done until a mutation reverting it fails exactly one named test;
+`tools/mutate.py` runs all 19.
 
 Still to do, and unchanged: **move policy into data** (the robot-ops manifest already lives in
 `robot-tools.json`; DOF tables and ABR tuning should join it), and codegen only if the protocol
@@ -181,11 +183,9 @@ outgrows what fixtures cover.
 ## Status
 
 The whole suite runs with no hardware, no network and no WebRTC stack — `pytest` is the
-authority on the count. Everything passes except **4 `xfail`s, each marking a real bug in this
-SDK** rather than a spec disagreement; see [the xfail policy](#the-xfail-policy). That number
-is worth quoting because it only moves deliberately: an `xfail` that starts passing fails the
-build. It was 8; the four that made the SDK actively lie to a caller are fixed, and each fix
-is pinned by a mutation that fails exactly one test.
+authority on the count. **Zero `xfail`s remain** — all eight known divergences from the spec
+are fixed, each pinned by a mutation that fails exactly one named test. See
+[the xfail policy](#the-xfail-policy) for why that number is worth quoting.
 
 Verified against the spec:
 

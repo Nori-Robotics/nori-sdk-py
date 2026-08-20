@@ -15,7 +15,8 @@ Two directions, and the second is the one that matters:
 Known divergences are marked `xfail(strict=True)` rather than deleted or left red. That way
 the suite stays green, each gap is documented with its consequence, and the moment somebody
 fixes one the test XPASSes and fails the build -- forcing the marker off. A self-retiring
-TODO list, in other words.
+TODO list, in other words. As of this revision the list is EMPTY: all eight divergences have
+been fixed, and each former xfail is now an ordinary test guarding the fix.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from nori_sdk.types import (
     CameraLayout,
     DaemonStatus,
     PolicyStreamStatus,
+    RobotError,
     RobotInfo,
 )
 
@@ -189,7 +191,10 @@ def test_lift_jog_validates():
     assert_valid(protocol.control_jog(1, {"left_lift": -0.25, "right_lift": 0.0}))
 
 
-# --- known divergences, self-retiring --------------------------------------------------
+# --- former divergences: each of these was an xfail marking a real bug in this SDK ------
+# They are kept as ordinary tests rather than deleted. The bug each one describes was live,
+# and the comment above each explains the consequence, which is the part worth preserving:
+# every one of them made the SDK report success while doing something else.
 
 
 def test_base_jog_uses_the_jog_namespace():
@@ -215,15 +220,34 @@ def test_an_all_stop_jog_validates():
     assert_valid(protocol.control_jog(1, JogBuilder.stop()))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: RecordVerb omits the legacy aliases (start/stop/discard/discard_last/"
-    "session_discard) that deployed clients still send and robots still accept.",
-)
 def test_record_accepts_every_verb_the_spec_allows():
+    """Including the legacy aliases. Deployed clients still send them and robots still accept
+    them, so an SDK that cannot even name them cannot describe what a fleet is doing."""
     schema = load_schema("record")
     for action in schema["properties"]["action"]["enum"]:
         assert action in protocol.RecordVerb.__args__, f"{action} missing from RecordVerb"
+
+
+def test_no_invented_record_verbs():
+    """The other direction. A verb this SDK offers but no robot accepts is a silent no-op."""
+    allowed = set(load_schema("record")["properties"]["action"]["enum"])
+    assert set(protocol.RecordVerb.__args__) <= allowed
+
+
+def test_the_destructive_verb_set_matches_what_the_spec_says_destroys_data():
+    """Data loss is the one thing here worth a guard rail. `discard` is deliberately excluded
+    -- it destroys on L2 and keeps on A3, so no static set can classify it and a caller has to
+    resolve it per robot."""
+    assert "session_discard" in protocol.DESTRUCTIVE_RECORD_VERBS
+    assert "episode_discard" in protocol.DESTRUCTIVE_RECORD_VERBS
+    assert "session_end" not in protocol.DESTRUCTIVE_RECORD_VERBS
+    assert "discard" not in protocol.DESTRUCTIVE_RECORD_VERBS
+    assert protocol.DESTRUCTIVE_RECORD_VERBS <= set(protocol.RecordVerb.__args__)
+
+
+def test_every_record_verb_builds_a_valid_frame():
+    for action in protocol.RecordVerb.__args__:
+        assert_valid(protocol.record(action))
 
 
 def test_policy_stream_status_models_the_real_fields():
@@ -281,25 +305,52 @@ def test_an_unknown_action_state_is_not_treated_as_finished():
     assert ActionStatus.from_wire({"state": "recalibrating"}).done is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: `error` frames are unmodelled -- not in INBOUND_KINDS, no dataclass. A "
-    "fatal robot error reaches the caller only as an untyped raw dict.",
-)
 def test_error_frames_are_modelled():
     assert "error" in protocol.INBOUND_KINDS
     _kind, parsed, _raw = protocol.decode('{"type":"error","code":"x","msg":"y","fatal":true}')
-    assert parsed is not None
+    assert isinstance(parsed, RobotError)
+    assert parsed.code == "x" and parsed.msg == "y" and parsed.fatal is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: a tile-less camera_layout is accepted and would blank a good layout. The "
-    "spec requires minItems 1; the robot re-sends the layout several times, so one "
-    "malformed repeat must not poison the session.",
-)
+def test_a_non_fatal_error_is_not_reported_as_fatal():
+    """`fatal` defaults FALSE per the schema, and fatal is what ends a session. Defaulting it
+    true would tear down a live connection over a soft stall notice."""
+    _kind, parsed, _raw = protocol.decode('{"type":"error","code":"obstruction","msg":"hit"}')
+    assert isinstance(parsed, RobotError) and parsed.fatal is False
+
+
+def test_recovery_codes_are_distinguishable_from_faults():
+    """Three `error` codes report a fault CLEARING. A client that renders every error frame as
+    a fault shows a red banner for the news that the problem went away."""
+    for code in ("obstruction_cleared", "arm_recovered", "motor_recovered"):
+        assert RobotError.from_wire({"type": "error", "code": code, "msg": ""}).recovered
+    assert not RobotError.from_wire({"type": "error", "code": "overtemp", "msg": ""}).recovered
+
+
+def test_an_unknown_error_code_still_parses_and_keeps_its_message():
+    """`code` is an open set -- newer robots add codes freely. The operator-readable `msg` is
+    what a client shows, so it must survive a code this SDK has never seen."""
+    err = RobotError.from_wire(
+        {"type": "error", "code": "flux_capacitor_desync", "msg": "see manual", "fatal": True}
+    )
+    assert err.code == "flux_capacitor_desync" and err.msg == "see manual" and err.fatal
+
+
 def test_tile_less_layout_is_rejected():
-    assert CameraLayout.from_wire({"type": "camera_layout", "cols": 2, "rows": 2, "tiles": []}) is None
+    """The robot re-sends the layout several times on open, so one malformed repeat must not
+    be able to blank a good layout for the rest of the session."""
+    for bad in ({"cols": 2, "rows": 2, "tiles": []}, {"cols": 2, "rows": 2}):
+        assert CameraLayout.from_wire({"type": "camera_layout", **bad}) is None
+
+
+@pytest.mark.parametrize(
+    "name,frame", [f for f in FIXTURES if f[1]["type"] == "camera_layout"], ids=lambda v: v
+)
+def test_every_golden_layout_survives_the_rejection_rule(name, frame):
+    """The other half: rejecting the malformed must not reject the real."""
+    parsed = CameraLayout.from_wire(frame)
+    assert parsed is not None, f"{name}: a valid layout was rejected"
+    assert parsed.tiles == frame["tiles"]
 
 
 def test_stateless_daemon_status_is_dropped():
@@ -320,12 +371,28 @@ def test_every_golden_daemon_status_survives_the_drop_rule(name, frame):
     assert parsed.online is (frame["state"] == "online")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="GAP: RobotInfo models neither `model` nor `capabilities`, so this SDK cannot "
-    "gate optional verbs and cannot name the hardware in a log.",
-)
 def test_ack_exposes_model_and_capabilities():
     info = RobotInfo.from_wire(dict(FIXTURES)["daemon/ack_l3.json"])
-    assert getattr(info, "model", None) == "L3"
-    assert "record" in getattr(info, "capabilities", [])
+    assert info.model == "L3"
+    assert info.capabilities is not None and "record" in info.capabilities
+    assert info.supports("record") is True
+    assert info.supports("call") is False
+
+
+def test_an_absent_capabilities_list_is_UNKNOWN_not_none_supported():
+    """The distinction the spec insists on. A robot predating the field must be probed or
+    assumed legacy; folding absent into "supports nothing" would silently disable working
+    features on every older robot in the fleet."""
+    silent = RobotInfo.from_wire({"type": "ack"})
+    assert silent.capabilities is None
+    assert silent.supports("record") is None, "absent was collapsed into False"
+
+    explicit = RobotInfo.from_wire({"type": "ack", "capabilities": []})
+    assert explicit.capabilities == []
+    assert explicit.supports("record") is False, "an explicit empty list is not unknown"
+
+
+def test_an_unrecognised_capability_is_ignored_not_an_error():
+    info = RobotInfo.from_wire({"type": "ack", "capabilities": ["record", "teleportation"]})
+    assert info.supports("teleportation") is True
+    assert info.supports("record") is True

@@ -49,7 +49,10 @@ log = logging.getLogger("nori_sdk.signaling")
 try:  # pragma: no cover - import guard
     import websocket  # websocket-client
 except ImportError:  # pragma: no cover
-    websocket = None
+    # Sentinel for "the supabase extra is not installed"; SupabaseSignaling.__init__ turns it
+    # into an ImportError naming the install command. mypy sees the name as a Module once the
+    # missing-stub override applies, so the rebind needs the ignore.
+    websocket = None  # type: ignore[assignment]
 
 
 class SupabaseSignaling(SignalingTransport):
@@ -65,7 +68,7 @@ class SupabaseSignaling(SignalingTransport):
         token_provider: Callable[[], str] | None = None,
         debug: bool = False,
     ) -> None:
-        """`room` is the robot's serial (e.g. "NORI-L3-0001") — the channel name both ends
+        """`room` is the robot's serial (e.g. "NORI-A3-0001") — the channel name both ends
         agree on.
 
         `token_provider` returns a Supabase JWT (see auth.UserAuth). Its PRESENCE is what

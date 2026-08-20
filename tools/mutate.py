@@ -67,6 +67,66 @@ MUTATIONS = [
         "            if not isinstance(parsed, DaemonStatus):\n                # Stateless",
         "            if False:\n                # Stateless",
     ),
+    (
+        "5. legacy record aliases dropped from RecordVerb again",
+        "src/nori_sdk/protocol.py",
+        '    "session_discard",\n    "status",\n    "start",\n    "stop",\n    "discard",\n    "discard_last",\n]',
+        '    "status",\n]',
+    ),
+    (
+        "5b. a verb no robot accepts is offered",
+        "src/nori_sdk/protocol.py",
+        '    "discard_last",\n]',
+        '    "discard_last",\n    "obliterate",\n]',
+    ),
+    (
+        "5c. session_end misclassified as destructive",
+        "src/nori_sdk/protocol.py",
+        'DESTRUCTIVE_RECORD_VERBS = frozenset({"episode_discard", "session_discard", "discard_last"})',
+        'DESTRUCTIVE_RECORD_VERBS = frozenset({"episode_discard", "session_end", "discard_last"})',
+    ),
+    (
+        "6. error frames unmodelled again",
+        "src/nori_sdk/protocol.py",
+        '    elif kind == "error":\n        parsed = RobotError.from_wire(obj)',
+        '    elif kind == "error" and False:\n        parsed = RobotError.from_wire(obj)',
+    ),
+    (
+        "6b. error.fatal defaults TRUE (would tear down a session on a soft stall)",
+        "src/nori_sdk/types.py",
+        'fatal=obj.get("fatal") is True,',
+        'fatal=obj.get("fatal") is not False,',
+    ),
+    (
+        "6c. recovery codes indistinguishable from faults",
+        "src/nori_sdk/types.py",
+        '{"obstruction_cleared", "arm_recovered", "motor_recovered"}',
+        'set()',
+    ),
+    (
+        "7. tile-less camera_layout accepted again",
+        "src/nori_sdk/types.py",
+        "        if not tiles:\n            return None",
+        "        if False:\n            return None",
+    ),
+    (
+        "8. capabilities: absent collapsed into 'supports nothing'",
+        "src/nori_sdk/types.py",
+        "        if self.capabilities is None:\n            return None",
+        "        if self.capabilities is None:\n            return False",
+    ),
+    (
+        "8b. ack model dropped",
+        "src/nori_sdk/types.py",
+        'model=_s(obj, "model"),',
+        "model=None,",
+    ),
+    (
+        "9. the mock derives its layout from the descriptor (the antipattern)",
+        "src/nori_sdk/mock/robot.py",
+        '"tiles": list(self.tiles)}',
+        '"tiles": list((self.descriptor or {}).get("cameras", []))}',
+    ),
 ]
 
 

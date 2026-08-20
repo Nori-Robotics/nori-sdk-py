@@ -6,6 +6,45 @@ in practice.
 
 ## Unreleased — 2026-08-20
 
+### The xfail list is now empty
+
+All four remaining divergences fixed. Each is mutation-pinned; `tools/mutate.py` now runs 19.
+
+- **`error` frames are modelled** (`RobotError`, and `"error"` added to `INBOUND_KINDS`). A
+  fatal robot error previously reached the caller only as an untyped dict. `fatal` defaults
+  FALSE per the schema — defaulting it true would tear down a live session over a soft stall.
+  Added `RECOVERY_ERROR_CODES` and `.recovered`, because three codes
+  (`obstruction_cleared`, `arm_recovered`, `motor_recovered`) report a fault *clearing*: a
+  client rendering every `error` as a fault shows a red banner for the good news.
+- **A tile-less `camera_layout` is rejected.** It was accepted, and adopting one blanks the
+  grid for the rest of the session — the robot repeats the layout on open, so a single
+  malformed repeat could poison a good one. Note this is the opposite of an ABSENT layout,
+  which is how a single-camera robot says "the whole frame is the one camera".
+- **`RecordVerb` carries all eleven spec verbs**, including the legacy aliases deployed
+  clients still send. Grouped in the source by what they do to DATA, since the names do not
+  signal it: `session_discard` is canonical and destructive (not a synonym for `session_end`
+  — they are opposites), `stop` also ends the session on L2, and `discard` **destroys on L2
+  but keeps on A3**. Added `DESTRUCTIVE_RECORD_VERBS`, from which `discard` is deliberately
+  absent: no static set can classify a verb whose meaning inverts per stack.
+- **`RobotInfo` exposes `model` and `capabilities`**, plus `supports()`. `capabilities` is
+  three-valued — `None` means the robot did not say, which is NOT "supports nothing".
+  Collapsing absent into False would silently disable working features on every robot
+  predating the field. `model` is advisory only; branch on `descriptor`/`capabilities`.
+
+### Mock and docs
+
+- **The mock no longer derives its camera layout from `descriptor.cameras`.** The schema names
+  this as an antipattern in as many words: the layout frame is the only authoritative
+  description of the tiling, the descriptor is diagnostic metadata, and a mock that generates
+  one from the other can never reproduce a disagreement — hiding exactly the layout bugs it
+  exists to catch. `MockRobot(tiles=[...])` now rehearses that case.
+- `DEFAULT_DESCRIPTOR` was commented "shaped like an L3". It is 5 DOF per arm, which is the
+  **L2** shape; A3 arms are 7 DOF. Corrected, with a note on why the smaller descriptor is
+  the right default.
+- **L3 → A3 throughout.** L3 is retired; room names, the leader-arm note and the mock comment
+  referenced it. Historical statements about how the TS SDK's DOF vocabulary drifted now say
+  "the 7-DOF arm" rather than naming a dead model.
+
 ### The mock became usable for development, not just for tests
 
 Driving `MockRobot` previously required private API (`teleop._control`, `teleop._handle_frame`).

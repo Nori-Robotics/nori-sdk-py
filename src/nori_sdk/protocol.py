@@ -26,6 +26,7 @@ from .types import (
     Perception,
     PolicyStreamStatus,
     RecordState,
+    RobotError,
     RobotInfo,
     Telemetry,
 )
@@ -41,6 +42,7 @@ INBOUND_KINDS = frozenset(
         "record_status",
         "policy_stream_status",
         "perception",
+        "error",
     }
 )
 
@@ -60,14 +62,49 @@ Jog = dict[str, Any]
 # RobotInfo.norm_mode (normally "range_m100_100"; grippers are [0, 100]).
 Action = dict[str, float]
 
+# Recording verbs. Grouped by what they do to DATA, because that is the axis that matters and
+# the names do not reliably signal it.
+#
+#   KEEPS DATA
+#     session_start    open a collection
+#     episode_start    open an episode (opens a session too, if none is open)
+#     episode_stop     finalise and KEEP the open episode
+#     session_end      close the session and keep it for shipping
+#     status           read-only
+#
+#   DESTROYS DATA -- irreversibly, on disk
+#     episode_discard  finalise and DROP the open episode
+#     session_discard  drop the ENTIRE open session (or, straight after session_end, the most
+#                      recent one). NOT a synonym for session_end -- they are opposites, and
+#                      despite sitting beside the aliases below this one is canonical.
+#
+#   LEGACY ALIASES -- deployed clients still send these and robots still accept them, so this
+#   SDK must be able to name them. Prefer the canonical verbs above in new code.
+#     start            open a session AND an episode
+#     stop             finalise the episode -- and on L2 ALSO END THE SESSION. A client using
+#                      `stop` between episodes on an L2 silently gets a different session
+#                      than it expects.
+#     discard          DESTROYS on L2 (alias for session_discard); KEEPS on A3/L3 (folded into
+#                      session_end). The same verb means opposite things per stack. This
+#                      divergence is real and unresolved upstream -- do not build a UI on it.
+#     discard_last     alias for session_discard on L2, targeting the most recent session.
 RecordVerb = Literal[
     "session_start",
     "episode_start",
     "episode_stop",
     "episode_discard",
     "session_end",
+    "session_discard",
     "status",
+    "start",
+    "stop",
+    "discard",
+    "discard_last",
 ]
+
+# The verbs that delete recorded data. `discard` is deliberately absent: it destroys on L2 and
+# keeps on A3, so it belongs to neither set and a caller must resolve it per robot.
+DESTRUCTIVE_RECORD_VERBS = frozenset({"episode_discard", "session_discard", "discard_last"})
 
 CommandName = Literal["estop", "reset_latch"]
 
@@ -99,8 +136,9 @@ def control_leader(seq: int, leader_action_deg: dict[str, float]) -> dict[str, A
     body joints are DEGREES around the calibrated leader zero, grippers normalized [0, 100].
     The robot does calibration-normalize + IK + a server-side slew clamp.
 
-    Note: L2 leader keys are not mappable to an L3 arm — the L3 gateway logs and ignores
-    them. Check RobotInfo.descriptor before driving a robot this way."""
+    Note: L2 leader keys are not mappable to a 7-DOF A3 arm — the A3 gateway logs and
+    ignores them. Check RobotInfo.descriptor (or capabilities["leader_action_deg"]) before
+    driving a robot this way."""
     return {"type": "control", "seq": seq, "leader_action_deg": leader_action_deg}
 
 
@@ -188,6 +226,7 @@ Inbound = (
     | RecordState
     | PolicyStreamStatus
     | Perception
+    | RobotError
 )
 
 
@@ -226,12 +265,15 @@ def decode(raw: str | bytes) -> tuple[str, Inbound | None, dict[str, Any]]:
         parsed = PolicyStreamStatus.from_wire(obj)
     elif kind == "perception":
         parsed = Perception.from_wire(obj)
+    elif kind == "error":
+        parsed = RobotError.from_wire(obj)
     else:
         parsed = None
     return kind, parsed, obj
 
 
 __all__ = [
+    "DESTRUCTIVE_RECORD_VERBS",
     "INBOUND_KINDS",
     "OUTBOUND_KINDS",
     "Action",

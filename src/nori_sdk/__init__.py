@@ -41,6 +41,7 @@ from .signaling import (
     SignalingTransport,
 )
 from .types import (
+    RECOVERY_ERROR_CODES,
     TERMINAL_ACTION_STATES,
     ActionStatus,
     CameraLayout,
@@ -50,6 +51,7 @@ from .types import (
     PolicyStreamStatus,
     RecordState,
     RobotDescriptor,
+    RobotError,
     RobotInfo,
     Telemetry,
     WatchdogProfile,
@@ -89,6 +91,7 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "NORI_PROTOCOL_VERSION",
+    "RECOVERY_ERROR_CODES",
     "TERMINAL_ACTION_STATES",
     "ActionStatus",
     "AuthError",
@@ -104,6 +107,7 @@ __all__ = [
     "RecordState",
     "RemoteTeleop",
     "RobotDescriptor",
+    "RobotError",
     "RobotInfo",
     "SdpPayload",
     "SignalingHandlers",

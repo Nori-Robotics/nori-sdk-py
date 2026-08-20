@@ -1,7 +1,7 @@
 """Minimal end-to-end script: connect, inspect the robot, drive it, record an episode.
 
     export NORI_SUPABASE_URL=... NORI_SUPABASE_ANON_KEY=... NORI_EMAIL=... NORI_PASSWORD=...
-    python examples/drive.py NORI-L3-0001
+    python examples/drive.py NORI-A3-0001
 
 Nothing here is model-specific: every joint and camera name comes from the robot's own
 descriptor, so the same script runs against a different Nori without edits.
@@ -69,4 +69,4 @@ async def main(room: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "NORI-L3-0001"))
+    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "NORI-A3-0001"))

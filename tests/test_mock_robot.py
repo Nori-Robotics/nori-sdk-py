@@ -218,3 +218,21 @@ def test_the_ack_advertises_the_profile_it_will_actually_enforce():
     assert info.watchdog_profile is not None
     advertised = (info.watchdog_profile.t_warn_ms, info.watchdog_profile.t_stop_ms)
     assert advertised == robot.watchdog_profile
+
+
+def test_the_layout_is_announced_independently_of_the_descriptor():
+    """The layout frame is the ONLY authoritative description of the video tiling;
+    descriptor.cameras is diagnostic metadata that may legitimately differ. A mock that
+    generated one from the other could never reproduce a disagreement, which is precisely the
+    class of layout bug it exists to catch."""
+    robot = MockRobot(tiles=["overhead", "front"])  # descriptor lists four cameras
+    _kind, layout, _raw = protocol.decode(robot.on_channel_open()[1])
+    assert layout.tiles == ["overhead", "front"]
+    assert robot.descriptor["cameras"] != layout.tiles
+    # And the grid must actually fit the tiles it announces.
+    assert layout.cols * layout.rows >= len(layout.tiles)
+
+
+def test_a_single_camera_mock_still_announces_no_layout():
+    """Absence is the signal: the whole frame is that one camera."""
+    assert kinds(MockRobot(cameras=False).on_channel_open()) == ["ack", "daemon_status"]
