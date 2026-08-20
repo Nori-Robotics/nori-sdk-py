@@ -223,6 +223,10 @@ class RemoteTeleop:
 
     @property
     def status(self) -> ConnectStatus:
+        """Where the connection attempt is, and why it stopped if it did. `failure` names a
+        cause — signaling_unreachable / robot_absent / session_rejected / negotiation_failed /
+        ice_failed — so a script can log "my network is broken" separately from "the robot is
+        off" without parsing prose."""
         return self._status
 
     @property
@@ -245,10 +249,17 @@ class RemoteTeleop:
 
     @property
     def camera_layout(self) -> CameraLayout | None:
+        """How to slice the single composited video track into per-camera tiles.
+
+        None has TWO meanings and they are not interchangeable: the robot has one camera (so
+        the whole frame is that camera), or no valid layout has arrived yet. A malformed
+        layout is rejected rather than adopted, so this never goes from good to blank."""
         return self._layout
 
     @property
     def is_connected(self) -> bool:
+        """The peer connection is up. NOT the same as "the robot will move": motion can be
+        offline behind a perfectly healthy transport — check `daemon_status` for that."""
         return self._connected.is_set()
 
     # --- outbound: motion ------------------------------------------------------------------
@@ -272,9 +283,23 @@ class RemoteTeleop:
         self._send(protocol.control_jog(self._next_seq(), _zeroed(payload)))
 
     def set_jog(self, payload: dict[str, Any] | None) -> None:
-        """Set the continuously streamed jog (the keyboard-held model). A background task
-        repeats it at JOG_HZ until it changes or is cleared with set_jog(None), which sends
-        one explicit zero frame. Use this for interactive drivers; use jog() for scripts."""
+        """Set the continuously streamed jog — the keyboard-held model.
+
+        THIS SDK DOES THE RESENDING FOR YOU. A background task repeats the payload at JOG_HZ
+        until you change it or clear it with set_jog(None), which sends one explicit zero
+        frame. You do not need to run your own timer to keep the watchdog fed, and you should
+        not: two loops racing means the robot sees whichever won.
+
+        That is worth stating plainly because the rule elsewhere in these docs — "resend
+        inside t_warn_ms or the robot stops" — describes the WIRE, not this method. It applies
+        to you only if you drive the channel yourself via protocol.control_jog().
+
+        Three entry points, and the difference is who owns the repetition:
+            jog(payload, duration=…)  this SDK repeats, for a fixed time, then zeroes
+            set_jog(payload)          this SDK repeats, indefinitely, until you clear it
+            protocol.control_jog(…)   YOU repeat, inside t_warn_ms, or the robot stops
+
+        Use set_jog for interactive drivers, jog() for scripts."""
         self._jog_payload = payload
         if payload is None:
             return
@@ -339,9 +364,18 @@ class RemoteTeleop:
         self._send(protocol.command("estop"))
 
     def reset_latch(self) -> None:
+        """Clear a latched E-STOP, re-enabling motion. The counterpart to estop().
+
+        Only a LATCH needs this. `safe_hold` — the watchdog's response to control-frame
+        silence — clears itself the moment frames resume, so calling this for a safe_hold is
+        unnecessary. Check `telemetry.safety` to tell them apart."""
         self._send(protocol.command("reset_latch"))
 
     def reset_arm(self, arm: str) -> None:
+        """Clear one arm's latch/target state ("left_arm" / "right_arm").
+
+        Narrower than reset_latch(): this clears a per-arm stall or target, not a session-wide
+        E-STOP. Note it rides the `control` frame rather than `command`."""
         self._send(protocol.control_reset(arm))
 
     # --- outbound: video / recording -------------------------------------------------------
@@ -352,6 +386,10 @@ class RemoteTeleop:
         self._send(protocol.video_bitrate(kbps))
 
     def set_video_paused(self, paused: bool) -> None:
+        """Pause or resume the robot's video encoder, to save power and bandwidth.
+
+        The robot defaults to flowing, so only send this when you want it paused. Video is
+        independent of control: pausing it does not affect motion, telemetry or the watchdog."""
         self._send(protocol.video_state(paused))
 
     async def record(
@@ -769,4 +807,8 @@ def _merge_telemetry(previous: Telemetry | None, incoming: Telemetry) -> Telemet
     )
 
 
-__all__ = ["JOG_HZ", "RemoteTeleop", "TeleopError"]
+# JOG_HZ, ROBOT_WAIT_S and RETRY_S are exported because they are already reachable and a
+# caller legitimately needs to reason about them -- JOG_HZ to size its own control loop,
+# ROBOT_WAIT_S to set a sensible wait_ready() timeout. Reachable-but-undeclared is the
+# worst of both: people depend on it anyway, and nothing stops it changing.
+__all__ = ["JOG_HZ", "RETRY_S", "ROBOT_WAIT_S", "RemoteTeleop", "TeleopError"]

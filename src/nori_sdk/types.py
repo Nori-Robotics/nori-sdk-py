@@ -9,6 +9,22 @@ unknown or missing field, only on structurally invalid JSON.
 These mirror the TypeScript interfaces in @nori/sdk (src/teleop.ts). Where the wire uses
 snake_case the dataclass field keeps snake_case; the TS side camel-cases at its boundary and
 that difference is cosmetic, not protocol.
+
+REACHING FIELDS THIS SDK DOES NOT MODEL. Three classes carry a `raw` dict — Perception,
+PolicyStreamStatus and RobotError — and the others do not. That is a rule, not an oversight:
+`raw` is for frames whose shape is robot-defined and still evolving, where a caller is
+expected to read something this version has never heard of. For the rest, the escape hatch is
+`protocol.decode()`, which always returns the untouched dict as its third element.
+
+The gap worth knowing: `RemoteTeleop.on()` and `.stream()` hand you the PARSED object, so a
+field this SDK does not model is not reachable through the session API. If a robot starts
+sending a telemetry key you need before this SDK models it, read it off the channel with
+`protocol.decode()` rather than waiting for a release.
+
+A "parses to None" return is never a parse failure to paper over — it is a decision the spec
+requires. DaemonStatus.from_wire and CameraLayout.from_wire both use it to mean DROP THIS
+FRAME AND KEEP WHAT YOU HAD, because in both cases adopting the malformed frame would
+manufacture a state the robot never reported.
 """
 
 from __future__ import annotations

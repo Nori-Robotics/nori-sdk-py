@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from . import motion, protocol
+from . import motion, protocol, types
 from .auth import AuthError, DeviceAuth, UserAuth
 from .signaling import (
     IcePayload,
@@ -89,6 +89,16 @@ def __getattr__(name: str) -> Any:
     return getattr(module, name)
 
 
+def __dir__() -> list[str]:
+    """Include the lazily-resolved names.
+
+    Without this, Python's default `dir()` reports only what has already been imported, so
+    RemoteTeleop — the class this package exists to provide — was missing from tab-completion,
+    `help(nori_sdk)` and every IDE's introspection until something touched it first. A symbol
+    you cannot discover is, for most users, a symbol that does not exist."""
+    return sorted(set(globals()) | set(_LAZY))
+
+
 __all__ = [
     "NORI_PROTOCOL_VERSION",
     "RECOVERY_ERROR_CODES",
@@ -121,4 +131,5 @@ __all__ = [
     "__version__",
     "motion",
     "protocol",
+    "types",
 ]

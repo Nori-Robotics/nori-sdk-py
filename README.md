@@ -99,6 +99,83 @@ imports are lazy — `import nori_sdk` never pulls in aiortc.
 | `nori_sdk.signaling_supabase` | `websocket-client` | Reference Supabase Realtime transport |
 | `nori_sdk.mock` | nothing | `mock_session()`, `MockRobot`, loopback signaling — hardware-free development and CI |
 
+## API reference
+
+Everything below is public and covered by `tests/test_public_api.py`, which pins the surface
+so it cannot drift by accident. Anything with a leading underscore is internal and may change
+in a patch release — including `teleop._control` and `teleop._handle_frame`, which the test
+suite uses and `mock_session()` exists to replace.
+
+### The session — `RemoteTeleop`
+
+| | |
+|---|---|
+| **Lifecycle** | `start()` · `stop()` · `async with` · `wait_connected()` · `wait_ready() -> RobotInfo` |
+| **State** (properties) | `status` · `info` · `telemetry` · `daemon_status` · `camera_layout` · `is_connected` |
+| **Motion** | `jog(payload, duration=)` · `set_jog(payload)` · `stop_jog()` · `action(targets, wait=)` |
+| **Safety** | `estop()` · `reset_latch()` · `reset_arm(arm)` |
+| **Recording** | `record(verb, task=)` |
+| **Video** | `set_video_bitrate(kbps)` · `set_video_paused(bool)` · `frames()` · `snapshot(role=)` |
+| **Events** | `on(kind, cb) -> unsubscribe` · `stream(kind)` |
+
+Three ways to jog, and the difference is **who owns the repetition** — the thing worth
+getting right, because the robot stops when frames stop:
+
+| Call | Who resends | Use for |
+|---|---|---|
+| `jog(payload, duration=…)` | the SDK, for a fixed time, then zeroes | scripts |
+| `set_jog(payload)` | the SDK, until you clear it | interactive drivers |
+| `protocol.control_jog(…)` | **you**, inside `t_warn_ms` | your own transport |
+
+`frames()` and `snapshot()` return `Any` because their type comes from `av`, an optional
+dependency — they yield `av.VideoFrame` when the `webrtc` extra is installed.
+
+### Wire types — `nori_sdk.types`
+
+`RobotInfo` · `RobotDescriptor` · `WatchdogProfile` · `Telemetry` · `CameraLayout` ·
+`DaemonStatus` · `ActionStatus` · `RecordState` · `PolicyStreamStatus` · `Perception` ·
+`RobotError` · `ConnectStatus`, plus `TERMINAL_ACTION_STATES` and `RECOVERY_ERROR_CODES`.
+
+Four have sharp edges worth knowing before you use them:
+
+- **`DaemonStatus.from_wire` and `CameraLayout.from_wire` can return `None`**, meaning *drop
+  this frame and keep what you had*. Adopting the malformed frame would invent a state the
+  robot never reported — a fake outage, or a blanked camera grid.
+- **`ActionStatus.done` is not success.** Terminal is `done | blocked | clamped | timeout`;
+  `clamped` finished somewhere other than you asked. Check `.succeeded`.
+- **`RobotInfo.capabilities` is three-valued.** `None` means the robot did not say, which is
+  not "supports nothing" — use `.supports(verb)`, which returns `True`/`False`/`None`.
+- **`RobotInfo.model` is advisory.** Branch on `descriptor` and `capabilities` so a model this
+  SDK has never heard of still works.
+
+### Frame vocabulary — `nori_sdk.protocol`
+
+Builders (`control_jog`, `control_action`, `control_leader`, `control_reset`, `command`,
+`video_*`, `link`, `record`, `policy_stream`, `call`) plus `encode` / `decode`,
+`INBOUND_KINDS` / `OUTBOUND_KINDS`, `RecordVerb` and `DESTRUCTIVE_RECORD_VERBS`.
+
+Reach for this to drive your own transport, or to read a field this SDK does not model yet:
+`decode()` always returns the untouched dict as its third element, whereas `on()` and
+`stream()` hand you the parsed object.
+
+`DESTRUCTIVE_RECORD_VERBS` deliberately omits `discard`, which **destroys data on L2 and
+keeps it on A3** — no static set can classify a verb whose meaning inverts per stack.
+
+### Motion helpers — `nori_sdk.motion`
+
+`JogBuilder` · `joints_by_group` · `joint_group` · `joint_short` · `scale_to_range` · `clamp`.
+All descriptor-driven: pass `info.descriptor` and a DOF the robot lacks raises instead of
+being silently dropped robot-side.
+
+### Mock — `nori_sdk.mock`
+
+`mock_session()` · `MockRobot` · `LoopbackSignaling` · `loopback_pair`, plus
+`WATCHDOG_PROFILES`, `JOG_SCALE` and `DEFAULT_DESCRIPTOR` for tests that need the numbers.
+
+### Auth — `nori_sdk.auth`
+
+`UserAuth` · `DeviceAuth` · `AuthError`. Both are token providers for `SupabaseSignaling`.
+
 ## Design decisions
 
 **Asyncio-native.** aiortc is asyncio, so the core is too. Callbacks may be sync or async;

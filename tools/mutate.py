@@ -127,6 +127,30 @@ MUTATIONS = [
         '"tiles": list(self.tiles)}',
         '"tiles": list((self.descriptor or {}).get("cameras", []))}',
     ),
+    (
+        '10. __dir__ removed: RemoteTeleop invisible to tab-completion again',
+        'src/nori_sdk/__init__.py',
+        'def __dir__() -> list[str]:',
+        'def _disabled__dir__() -> list[str]:',
+    ),
+    (
+        '10b. a name silently dropped from the public surface',
+        'src/nori_sdk/__init__.py',
+        '    "RobotError",\n    "RobotInfo",',
+        '    "RobotInfo",',
+    ),
+    (
+        '10c. a public session method loses its docstring',
+        'src/nori_sdk/teleop.py',
+        '    def reset_latch(self) -> None:\n        """',
+        '    def reset_latch(self) -> None:\n        pass_doc = """',
+    ),
+    (
+        '10d. a constant goes public without being declared',
+        'src/nori_sdk/mock/robot.py',
+        'JOG_SCALE = 40.0',
+        'JOG_SCALE = 40.0\nSNEAKY_PUBLIC_CONSTANT = 1',
+    ),
 ]
 
 

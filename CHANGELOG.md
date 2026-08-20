@@ -6,6 +6,39 @@ in practice.
 
 ## Unreleased — 2026-08-20
 
+### Public API surface audited and pinned
+
+The surface an SDK promises drifts by accident — a helper loses its underscore, a name is
+dropped from `__all__` while callers still import it, a new method ships undocumented. None of
+that fails a normal suite, and all of it reaches users. It is now data, in
+`tests/test_public_api.py`, with a snapshot of the top-level surface that has to be edited
+deliberately.
+
+- **`dir(nori_sdk)` omitted `RemoteTeleop`.** The lazy-import `__getattr__` resolved the three
+  optional-extra names on access but never listed them, so the class this package exists to
+  provide was missing from tab-completion, `help()` and IDE introspection until something
+  touched it first. Added `__dir__`.
+- **Six public members of `RemoteTeleop` had no docstring**: `status`, `camera_layout`,
+  `is_connected`, `reset_latch`, `reset_arm`, `set_video_paused`. These are exactly the ones
+  carrying behaviour a signature cannot convey — that `is_connected` does not mean the robot
+  will move, that `reset_latch` is for a latch and not for `safe_hold`, that `camera_layout`
+  being `None` has two different meanings.
+- **`set_jog()` was documented misleadingly**, reported from the first external review. The
+  README's "resend inside `t_warn_ms`" rule describes the WIRE, and `set_jog` does the
+  resending for you; read together they implied a caller should run its own timer, which would
+  race the SDK's. All three jog entry points now state who owns the repetition, in a table.
+- **Five constants were reachable but undeclared** (`RETRY_S`, `ROBOT_WAIT_S`, `JOG_SCALE`,
+  `WATCHDOG_PROFILES`, `DEFAULT_LINK_MODE`). Reachable-but-undeclared is the worst of both:
+  people depend on it anyway and nothing stops it changing. Now in `__all__`.
+- **`nori_sdk.types` is exported** alongside `motion` and `protocol`, which it should have
+  been all along.
+- **Documented the forward-compatibility rule.** Three classes carry `raw` and the rest do
+  not, which is a rule rather than an oversight — and the gap it leaves is now stated: `on()`
+  and `stream()` hand you the PARSED object, so a field this SDK does not model is reachable
+  only via `protocol.decode()`.
+- **`README.md` gained an API reference** — the actual question a new developer has after the
+  quickstart, which the layering table did not answer.
+
 ### The xfail list is now empty
 
 All four remaining divergences fixed. Each is mutation-pinned; `tools/mutate.py` now runs 19.

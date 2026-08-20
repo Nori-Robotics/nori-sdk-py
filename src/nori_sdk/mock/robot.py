@@ -362,4 +362,11 @@ class MockRobot:
         return frame
 
 
-__all__ = ["DEFAULT_DESCRIPTOR", "LAYOUT_REPEATS", "MockRobot"]
+__all__ = [
+    "DEFAULT_DESCRIPTOR",
+    "DEFAULT_LINK_MODE",
+    "JOG_SCALE",
+    "LAYOUT_REPEATS",
+    "WATCHDOG_PROFILES",
+    "MockRobot",
+]
