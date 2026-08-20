@@ -1,0 +1,256 @@
+"""The nori-protocol wire vocabulary, operator side. Pure functions, zero dependencies.
+
+This module is the Python counterpart of the message literals scattered through @nori/sdk's
+teleop.ts, and the mirror image of the robot's nori_gateway/protocol.py: what that module
+`handle()`s, this module builds, and what it emits, this module parses.
+
+Keeping it separate from the session (teleop.py) is the point — the vocabulary is the part
+that must stay byte-identical across three implementations (TS SDK, this SDK, the robot
+gateway), so it lives somewhere it can be tested against shared conformance vectors with no
+WebRTC stack in the room. See tests/vectors/ and README "Staying in sync".
+
+SAFETY: nothing here can make a robot unsafe. Clamping, the watchdog, E-STOP and the torque
+lifecycle all live on the robot, which defends itself against any client — a malformed or
+hostile frame can at worst be ignored.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Literal
+
+from .types import (
+    ActionStatus,
+    CameraLayout,
+    DaemonStatus,
+    Perception,
+    PolicyStreamStatus,
+    RecordState,
+    RobotInfo,
+    Telemetry,
+)
+
+# Frames the robot may send us. Anything outside this set is ignored (forward compat).
+INBOUND_KINDS = frozenset(
+    {
+        "ack",
+        "telemetry",
+        "camera_layout",
+        "daemon_status",
+        "action_status",
+        "record_status",
+        "policy_stream_status",
+        "perception",
+    }
+)
+
+# Frames we may send. The robot ignores what it doesn't know, and so must we.
+OUTBOUND_KINDS = frozenset(
+    {"control", "command", "video", "link", "record", "policy_stream", "call"}
+)
+
+# A `jog` payload: normalized rates in [-1, 1] per DOF. The robot scales by its own per-tick
+# step, so these are intent, not units. Nested per group:
+#   {"left_arm": {"shoulder_pan": 0.5}, "base": {"linear": 1.0}, "left_lift": -0.3}
+# NOTE the base keys: "linear"/"angular", NOT the descriptor's "x.vel"/"theta.vel".
+# A robot reads linear/angular as absent -- i.e. STOP -- from an x/theta payload.
+Jog = dict[str, Any]
+
+# An `action` payload: ABSOLUTE targets, flat "<motor>.pos" -> value, in the units named by
+# RobotInfo.norm_mode (normally "range_m100_100"; grippers are [0, 100]).
+Action = dict[str, float]
+
+RecordVerb = Literal[
+    "session_start",
+    "episode_start",
+    "episode_stop",
+    "episode_discard",
+    "session_end",
+    "status",
+]
+
+CommandName = Literal["estop", "reset_latch"]
+
+
+# --- outbound builders ---------------------------------------------------------------------
+# Each returns a plain dict; the session serializes. Split this way so tests can assert on
+# structure without a transport, and so a caller can inspect/log a frame before it flies.
+
+
+def control_jog(seq: int, jog: Jog) -> dict[str, Any]:
+    """The continuous velocity stream. Send it at ~20 Hz while the operator is holding an
+    input: the robot's watchdog ramps to a stop if frames stop arriving inside
+    WatchdogProfile.t_warn_ms, which is the intended dead-man behavior, not a bug to work
+    around. Send an all-zero jog to stop cleanly."""
+    return {"type": "control", "seq": seq, "jog": jog}
+
+
+def control_action(seq: int, action: Action, action_id: str = "") -> dict[str, Any]:
+    """An absolute move. With an action_id the robot replies `action_status` (accepted or
+    blocked); without one it is fire-and-forget."""
+    frame: dict[str, Any] = {"type": "control", "seq": seq, "action": action}
+    if action_id:
+        frame["action_id"] = action_id
+    return frame
+
+
+def control_leader(seq: int, leader_action_deg: dict[str, float]) -> dict[str, Any]:
+    """Absolute pose from a physical leader arm. Keys are flat "<side>_arm_<joint>.pos";
+    body joints are DEGREES around the calibrated leader zero, grippers normalized [0, 100].
+    The robot does calibration-normalize + IK + a server-side slew clamp.
+
+    Note: L2 leader keys are not mappable to an L3 arm — the L3 gateway logs and ignores
+    them. Check RobotInfo.descriptor before driving a robot this way."""
+    return {"type": "control", "seq": seq, "leader_action_deg": leader_action_deg}
+
+
+def control_reset(arm: str) -> dict[str, Any]:
+    """Clear the per-arm latch/target state. Note this rides `control`, not `command`."""
+    return {"type": "control", "reset": {arm: True}}
+
+
+def command(name: CommandName) -> dict[str, Any]:
+    """E-STOP or latch reset. Wire shape is a flag, not a name: {"estop": true}."""
+    return {"type": "command", name: True}
+
+
+def video_state(paused: bool) -> dict[str, Any]:
+    """Pause/resume the inbound video encoder on the robot (power saving). The robot
+    defaults to flowing, so only send this when you want it paused."""
+    return {"type": "video", "state": "pause" if paused else "resume"}
+
+
+def video_bitrate(kbps: int) -> dict[str, Any]:
+    """Target encoder bitrate. Intercepted by the robot's WebRTC bridge — it never reaches
+    the motion daemon. The robot applies its own thermal/load ceiling on top."""
+    return {"type": "video", "bitrate": int(kbps)}
+
+
+def video_quality(quality: str) -> dict[str, Any]:
+    """Named quality preset ("low" | "normal")."""
+    return {"type": "video", "quality": quality}
+
+
+def link(mode: str) -> dict[str, Any]:
+    """Tell the robot which network path we resolved to. This SELECTS ITS WATCHDOG PROFILE
+    (LAN 150/500 ms vs WAN 300/1000 ms), so reporting "lan" on a WAN link gives you a
+    tighter dead-man window than your latency can hold. RemoteTeleop derives it from the
+    selected ICE candidate pair; only override if you know better."""
+    return {"type": "link", "mode": mode}
+
+
+def record(action: RecordVerb, task: str = "", **extra: Any) -> dict[str, Any]:
+    """Dataset recording verbs. Every verb draws exactly one `record_status` reply, so a
+    client can await each one. Order is session_start -> episode_start -> episode_stop
+    (or episode_discard) -> ... -> session_end."""
+    frame: dict[str, Any] = {"type": "record", "action": action}
+    if task:
+        frame["task"] = task
+    frame.update(extra)
+    return frame
+
+
+def policy_stream(action: str, **extra: Any) -> dict[str, Any]:
+    """Drive the robot's policy streamer (start/stop/status)."""
+    frame: dict[str, Any] = {"type": "policy_stream", "action": action}
+    frame.update(extra)
+    return frame
+
+
+def call(
+    state: str | None = None, mic_muted: bool | None = None, clip: bool = False
+) -> dict[str, Any]:
+    """Two-way audio call control. Intercepted by the robot's bridge like `video`."""
+    frame: dict[str, Any] = {"type": "call"}
+    if state is not None:
+        frame["state"] = state
+    if mic_muted is not None:
+        frame["mic_muted"] = mic_muted
+    if clip:
+        frame["clip"] = True
+    return frame
+
+
+def encode(frame: dict[str, Any]) -> str:
+    """Serialize one outbound frame. Compact separators because the control channel is
+    per-message and we send it at 20 Hz."""
+    return json.dumps(frame, separators=(",", ":"))
+
+
+# --- inbound parsing -----------------------------------------------------------------------
+
+Inbound = (
+    RobotInfo
+    | Telemetry
+    | CameraLayout
+    | DaemonStatus
+    | ActionStatus
+    | RecordState
+    | PolicyStreamStatus
+    | Perception
+)
+
+
+def decode(raw: str | bytes) -> tuple[str, Inbound | None, dict[str, Any]]:
+    """Parse one inbound datachannel message.
+
+    Returns (kind, parsed, raw_dict). `parsed` is None for a frame kind this SDK version
+    doesn't model — the raw dict is still handed back so a caller can act on a newer robot's
+    vocabulary without waiting for an SDK release. Unparseable JSON yields ("", None, {}):
+    the channel is unreliable and lossy by design, so garbage is dropped, never raised.
+    """
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return "", None, {}
+    if not isinstance(obj, dict):
+        return "", None, {}
+    kind = obj.get("type")
+    if not isinstance(kind, str):
+        return "", None, obj
+
+    parsed: Inbound | None
+    if kind == "ack":
+        parsed = RobotInfo.from_wire(obj)
+    elif kind == "telemetry":
+        parsed = Telemetry.from_wire(obj)
+    elif kind == "camera_layout":
+        parsed = CameraLayout.from_wire(obj)
+    elif kind == "daemon_status":
+        parsed = DaemonStatus.from_wire(obj)
+    elif kind == "action_status":
+        parsed = ActionStatus.from_wire(obj)
+    elif kind == "record_status":
+        parsed = RecordState.from_wire(obj)
+    elif kind == "policy_stream_status":
+        parsed = PolicyStreamStatus.from_wire(obj)
+    elif kind == "perception":
+        parsed = Perception.from_wire(obj)
+    else:
+        parsed = None
+    return kind, parsed, obj
+
+
+__all__ = [
+    "INBOUND_KINDS",
+    "OUTBOUND_KINDS",
+    "Action",
+    "CommandName",
+    "Inbound",
+    "Jog",
+    "RecordVerb",
+    "call",
+    "command",
+    "control_action",
+    "control_jog",
+    "control_leader",
+    "control_reset",
+    "decode",
+    "encode",
+    "link",
+    "policy_stream",
+    "record",
+    "video_bitrate",
+    "video_quality",
+    "video_state",
+]

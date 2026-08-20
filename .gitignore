@@ -1,0 +1,13 @@
+.venv/
+.DS_Store
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+# Where CI checks out Nori-Protocol and where tests/_spec.py looks for it first. Ignored
+# while it is a plain checkout; delete this line if it becomes a real submodule.
+spec/

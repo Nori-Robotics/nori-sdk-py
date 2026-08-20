@@ -1,0 +1,104 @@
+name: ci
+
+# Runs on every push and PR. Three gates, and the third is the one with teeth: conformance
+# validates this SDK's frames against the real nori-protocol schemas, so "we invented a field
+# name" fails here rather than on a robot.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The spec is a separate repo. A schema change there can invalidate this SDK without a
+  # commit here, so a nightly run catches the drift instead of the next contributor.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor declared in pyproject (requires-python). Testing only the newest
+        # would let a 3.12+ idiom land and break the floor silently.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      # The spec lives in Nori-Robotics/Nori-Protocol, a PRIVATE repo, so the default
+      # GITHUB_TOKEN cannot read it -- it is scoped to this repository alone. NORI_PROTOCOL_TOKEN
+      # must be a PAT (or app token) with read access to that repo.
+      - name: Check out nori-protocol
+        uses: actions/checkout@v4
+        with:
+          repository: Nori-Robotics/Nori-Protocol
+          path: spec/nori-protocol
+          token: ${{ secrets.NORI_PROTOCOL_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Typecheck
+        # Inert without src/nori_sdk/py.typed -- mypy refuses to check an installed package
+        # that does not advertise type information, and exits 0 having examined nothing.
+        run: mypy
+
+      - name: Test
+        # Set explicitly rather than relying on the submodule-path fallback. tests/_spec.py
+        # RAISES on a set-but-invalid NORI_PROTOCOL_DIR, so a broken spec checkout fails the
+        # job instead of silently skipping every conformance test and reporting green -- which
+        # is the exact failure mode this spec exists to prevent.
+        env:
+          NORI_PROTOCOL_DIR: ${{ github.workspace }}/spec/nori-protocol
+        run: pytest -q --strict-markers
+
+      - name: Assert conformance actually ran
+        # Belt and braces on the check above. `pytest --collect-only -q` prints one line per
+        # collected test, so a conformance suite that silently collected nothing is caught
+        # even if the skip logic changes underneath us.
+        env:
+          NORI_PROTOCOL_DIR: ${{ github.workspace }}/spec/nori-protocol
+        run: |
+          n=$(pytest --collect-only -q tests/test_conformance.py | grep -c '::' || true)
+          echo "collected $n conformance tests"
+          test "$n" -gt 20 || { echo "::error::conformance suite did not run ($n tests)"; exit 1; }
+
+  build:
+    # Catches the packaging mistakes tests never see: a module missing from the wheel, or
+    # py.typed not being included, which would ship an untyped package to every consumer.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - name: Assert py.typed is in the wheel
+        run: python -c "
+          import pathlib, zipfile, sys
+          wheel = next(pathlib.Path('dist').glob('*.whl'))
+          names = zipfile.ZipFile(wheel).namelist()
+          assert 'nori_sdk/py.typed' in names, f'py.typed missing from {wheel.name}: {names}'
+          print(f'{wheel.name} ships py.typed and {len(names)} entries')
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

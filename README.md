@@ -41,8 +41,15 @@ demand — `MockRobot(online=False)` (motion stack down), `accepted=False` (sess
 `descriptor=None` (legacy robot, no descriptor), `cameras=False` (no camera layout),
 `action_outcome="clamped"` (a move that lands somewhere other than commanded).
 
+The mock **enforces the watchdog**: control-frame silence past `t_stop_ms` stops the motion
+and reports `safe_hold`, and `link("lan"|"wan")` selects which profile it enforces. That is
+deliberate — it is the one rule a script can violate and still appear to work locally, so the
+double has to punish it here rather than let hardware do it. It also integrates a pose, so
+telemetry responds to what you commanded.
+
 **What a green mock run does not prove:** ICE, TURN, bandwidth, video, or real timing. It
-means your logic is right, not that your network is.
+means your logic is right, not that your network is. Also unmodelled: `perception` and
+`error` frames, motor faults, thermals, and a daemon that goes offline mid-session.
 
 ## Quickstart (against a robot)
 

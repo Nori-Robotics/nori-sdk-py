@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nori-sdk"
+version = "0.1.0"
+description = "Python operator client for Nori robots — nori-protocol over a WebRTC data channel."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Nori Robotics" }]
+keywords = ["robotics", "teleoperation", "webrtc", "nori"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The CORE (nori_sdk.types / .protocol / .motion / .signaling / .auth) has ZERO runtime
+# dependencies, mirroring @nori/sdk's core entry: you can build and parse every wire frame,
+# and implement your own transport, without installing a WebRTC stack. Everything heavier
+# sits behind an extra.
+dependencies = []
+
+[project.optional-dependencies]
+# The actual session: aiortc brings the peer connection, DTLS/SRTP and H.264 depacketizing.
+webrtc = ["aiortc>=1.9", "av>=12"]
+# The reference Supabase Realtime signaling transport (Phoenix websocket, no supabase SDK).
+supabase = ["websocket-client>=1.7"]
+# Everything a normal user wants.
+all = ["nori-sdk[webrtc,supabase]"]
+dev = [
+  "nori-sdk[all]",
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  # Conformance tests validate this SDK's frames against the nori-protocol schemas.
+  # >=4.18 for `referencing`, which resolves the spec's cross-file $ref.
+  "jsonschema>=4.18",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/Nori-Robotics/nori-sdk-py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nori_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 96
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# BLE001/S110: broad `except Exception` and try/except/pass are deliberate here, not
+# laziness. This SDK sits between a lossy data channel, a reconnecting websocket and user
+# callbacks, and in every one of those places the correct response to an unexpected error is
+# to log-and-continue rather than to kill a live robot session. Each site says why in a
+# comment; the rule can't tell those apart from a swallowed bug, so it is off by policy.
+ignore = ["BLE001", "S110"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["nori_sdk"]
+strict = true
+
+# aiortc and websocket-client ship no type information. Their absence is not a finding, and
+# leaving it unsuppressed buries the findings that ARE ours. Note this whole config was inert
+# until src/nori_sdk/py.typed existed: without that marker mypy refuses to check an installed
+# package at all, so `mypy` exited 0 having examined nothing.
+[[tool.mypy.overrides]]
+module = ["aiortc.*", "av.*", "websocket.*"]
+ignore_missing_imports = true
+# The event-based APIs of both libraries decorate our handlers with untyped callables, which
+# strict mode then reports as "untyped decorator makes function untyped" on OUR function.
+[[tool.mypy.overrides]]
+module = ["nori_sdk.teleop", "nori_sdk.signaling_supabase"]
+disallow_untyped_decorators = false
