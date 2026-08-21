@@ -36,12 +36,51 @@ DEFAULT_DESCRIPTOR: dict[str, Any] = {
     },
 }
 
+# The A3: 7-DoF arms + gripper per side, ONE central telescoping lift (bare "lift" jog key,
+# "lift.pos" telemetry in MILLIMETERS). This is not a guess at the shape — it is transcribed
+# from the LIVE descriptor an A3 gateway (NORI-A3-0000, nori_ws 7805a46) served over the
+# wire on 2026-08-21, the same session that first drove the hardware through this SDK.
+_A3_ARM_JOINTS = (
+    "shoulder_pitch",
+    "shoulder_roll",
+    "bicep_yaw",
+    "elbow_pitch",
+    "forearm_yaw",
+    "wrist_pitch",
+    "wrist_roll",
+    "gripper",
+)
+A3_DESCRIPTOR: dict[str, Any] = {
+    "buses": ["left", "right"],
+    "joints": [
+        f"{side}_arm_{joint}.pos" for side in ("left", "right") for joint in _A3_ARM_JOINTS
+    ],
+    "base": ["x.vel", "theta.vel"],
+    "aux": ["lift"],
+    "cameras": ["left_wrist", "right_wrist", "overhead", "front"],
+    "ranges": {
+        **{
+            f"{side}_arm_{joint}.pos": (
+                [0.0, 100.0] if joint == "gripper" else [-100.0, 100.0]
+            )
+            for side in ("left", "right")
+            for joint in _A3_ARM_JOINTS
+        },
+        "lift.pos": [0.0, 720.0],  # millimeters; the 0-0.72 m prismatic column
+    },
+}
+
 LAYOUT_REPEATS = 5  # the control channel is unreliable, so one-shot metadata is repeated
 
 # Normalized-units per second at full jog rate. A round number chosen so a 1 s full-rate jog
 # moves a visible 40 units on a [-100, 100] joint; the real per-tick step is robot-side and
 # model-specific, and nothing should depend on this matching it.
 JOG_SCALE = 40.0
+
+# Central-lift advance at full rate, in mm/s — "lift.pos" telemetry is millimeters, so it
+# cannot ride JOG_SCALE's normalized units. 50 mm/s matches the real column's normal-PWM
+# speed (~0.05 m/s), but as with JOG_SCALE, nothing should depend on the match.
+CENTRAL_LIFT_MM_PER_S = 50.0
 
 # (t_warn_ms, t_stop_ms) per link mode. The ROBOT owns these -- the client only reports which
 # network it is on, via `link`, and the robot picks. Hard-coded in both real stacks too.
@@ -166,9 +205,14 @@ class MockRobot:
         self._set_base_velocity(self.jog.get("base"))
 
         for group, value in self.jog.items():
-            if group in ("left_lift", "right_lift"):
+            if group in ("left_lift", "right_lift", "lift"):
+                # Bare-scalar lifts. "lift" is the A-series central column and its
+                # telemetry unit is MILLIMETERS, so it advances on its own scale —
+                # 50 mm/s at full rate, matching the real Pico's normal-PWM speed —
+                # while the per-arm rails stay on the normalized JOG_SCALE.
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    self._advance(f"{group}.pos", float(value) * dt * JOG_SCALE)
+                    scale = CENTRAL_LIFT_MM_PER_S if group == "lift" else JOG_SCALE
+                    self._advance(f"{group}.pos", float(value) * dt * scale)
             elif group != "base" and isinstance(value, dict):
                 for dof, rate in value.items():
                     if isinstance(rate, (int, float)) and not isinstance(rate, bool):
@@ -363,6 +407,8 @@ class MockRobot:
 
 
 __all__ = [
+    "A3_DESCRIPTOR",
+    "CENTRAL_LIFT_MM_PER_S",
     "DEFAULT_DESCRIPTOR",
     "DEFAULT_LINK_MODE",
     "JOG_SCALE",

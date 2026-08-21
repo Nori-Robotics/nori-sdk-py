@@ -11,7 +11,7 @@ order is a client that breaks on hardware.
 """
 
 from .loopback import LoopbackSignaling, loopback_pair
-from .robot import MockRobot
+from .robot import A3_DESCRIPTOR, MockRobot
 from .session import mock_session
 
-__all__ = ["LoopbackSignaling", "MockRobot", "loopback_pair", "mock_session"]
+__all__ = ["A3_DESCRIPTOR", "LoopbackSignaling", "MockRobot", "loopback_pair", "mock_session"]
