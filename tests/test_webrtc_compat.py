@@ -76,3 +76,50 @@ def test_local_candidates_dedupes_bundle_repeats() -> None:
 
 def test_local_candidates_empty_sdp() -> None:
     assert local_candidates("v=0\r\ns=-") == []
+
+
+def test_dtls_cipher_list_is_forward_secret_only() -> None:
+    # Every suite must be ECDHE (forward secrecy); plain-RSA key exchange is
+    # deliberately absent — Chrome<->webrtcbin interop proves the GStreamer
+    # side does ECDHE-RSA, so non-PFS fallbacks would only weaken sessions.
+    from nori_sdk.webrtc_compat import _DTLS_CIPHERS
+
+    for suite in _DTLS_CIPHERS.decode().split(":"):
+        assert suite.startswith("ECDHE-"), suite
+
+
+def test_widen_dtls_ciphers_patches_and_is_idempotent(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import pytest
+
+    pytest.importorskip("aiortc")
+    from aiortc.rtcdtlstransport import RTCCertificate
+
+    from nori_sdk import webrtc_compat
+
+    monkeypatch.setattr(webrtc_compat, "_ciphers_widened", False)
+    before = RTCCertificate._create_ssl_context
+    try:
+        assert webrtc_compat.widen_dtls_ciphers() is True
+        assert RTCCertificate._create_ssl_context is not before
+        patched = RTCCertificate._create_ssl_context
+        # idempotent: a second call must not stack another wrapper
+        assert webrtc_compat.widen_dtls_ciphers() is True
+        assert RTCCertificate._create_ssl_context is patched
+    finally:
+        RTCCertificate._create_ssl_context = before  # type: ignore[method-assign]
+        webrtc_compat._ciphers_widened = False
+
+
+def test_widen_dtls_ciphers_degrades_without_the_seam(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # If a future aiortc moves _create_ssl_context, the patch must degrade to
+    # a warning + unpatched behavior, never break session start.
+    import pytest
+
+    pytest.importorskip("aiortc")
+    from aiortc.rtcdtlstransport import RTCCertificate
+
+    from nori_sdk import webrtc_compat
+
+    monkeypatch.setattr(webrtc_compat, "_ciphers_widened", False)
+    monkeypatch.delattr(RTCCertificate, "_create_ssl_context")
+    assert webrtc_compat.widen_dtls_ciphers() is False

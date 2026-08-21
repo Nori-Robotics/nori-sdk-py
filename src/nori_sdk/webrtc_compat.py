@@ -36,6 +36,7 @@ stricter robot build.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -46,13 +47,15 @@ __all__ = ["ensure_h264_fmtp", "local_candidates", "widen_dtls_ciphers"]
 _H264_FMTP = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
 
 # aiortc's four default ECDSA suites, in aiortc's own order, then their RSA
-# twins, then plain-RSA fallbacks for a server that cannot do ECDHE at all.
+# twins. ECDHE-only on purpose: every RSA suite here still has forward
+# secrecy, and Chrome<->webrtcbin interop proves the GStreamer side does
+# ECDHE-RSA (Chrome dropped plain-RSA key exchange years ago), so non-PFS
+# fallbacks would buy nothing and weaken recorded-session confidentiality.
 _DTLS_CIPHERS = (
     b"ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
     b"ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
     b"ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:"
-    b"ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:"
-    b"AES128-GCM-SHA256:AES128-SHA:AES256-SHA"
+    b"ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA"
 )
 
 _RTPMAP_H264 = re.compile(r"a=rtpmap:(\d+) H264/90000")
@@ -98,25 +101,42 @@ def local_candidates(sdp: str) -> list[tuple[int, str]]:
     return pairs
 
 
-def widen_dtls_ciphers() -> None:
-    """Widen aiortc's DTLS cipher list with RSA-auth suites. Idempotent.
+def widen_dtls_ciphers() -> bool:
+    """Widen aiortc's DTLS cipher list with ECDHE-RSA suites. Idempotent.
 
     Patches `RTCCertificate._create_ssl_context` so every context built for
     a session offers both ECDSA- and RSA-auth suites. Called by
-    `RemoteTeleop` before building a peer; safe to call repeatedly and safe
-    when the `webrtc` extra is absent (import happens here, lazily).
+    `RemoteTeleop` before building a peer; safe to call repeatedly.
+
+    This reaches into an aiortc PRIVATE (`_create_ssl_context`), which is the
+    only seam aiortc exposes for cipher configuration. If a future aiortc
+    moves that seam, the failure mode must be "sessions against RSA-cert
+    robots fail at DTLS with a known signature" — NOT "every session dies at
+    _fresh_peer" — so a missing seam degrades to a logged warning and the
+    unpatched behavior. Returns True when the widened list is in effect.
     """
     global _ciphers_widened
     if _ciphers_widened:
-        return
-    from aiortc.rtcdtlstransport import RTCCertificate
+        return True
+    try:
+        from aiortc.rtcdtlstransport import RTCCertificate
 
-    original = RTCCertificate._create_ssl_context
+        original = RTCCertificate._create_ssl_context
 
-    def _widened(self: Any, srtp_profiles: Any) -> Any:
-        ctx = original(self, srtp_profiles)
-        ctx.set_cipher_list(_DTLS_CIPHERS)
-        return ctx
+        def _widened(self: Any, srtp_profiles: Any) -> Any:
+            ctx = original(self, srtp_profiles)
+            ctx.set_cipher_list(_DTLS_CIPHERS)
+            return ctx
 
-    RTCCertificate._create_ssl_context = _widened  # type: ignore[method-assign]
+        RTCCertificate._create_ssl_context = _widened  # type: ignore[method-assign]
+    except (ImportError, AttributeError) as exc:
+        logging.getLogger("nori_sdk.webrtc_compat").warning(
+            "could not widen aiortc DTLS ciphers (%s: %s) — sessions against "
+            "RSA-certificate robots (GStreamer webrtcbin gateways) will fail "
+            "the DTLS handshake; ECDSA-certificate robots are unaffected",
+            type(exc).__name__,
+            exc,
+        )
+        return False
     _ciphers_widened = True
+    return True
