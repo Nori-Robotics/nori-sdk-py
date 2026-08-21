@@ -91,13 +91,18 @@ jobs:
       - run: python -m build
       - run: twine check dist/*
       - name: Assert py.typed is in the wheel
-        run: python -c "
-          import pathlib, zipfile, sys
+        # NB: this step's original `run: python -c "` multi-line form was INVALID
+        # YAML (the `:` inside the f-string made the scalar a mapping) — it made
+        # the whole workflow fail at parse time, 0s, on every push since the
+        # repo's first commit. Block scalar + heredoc keeps YAML out of it.
+        run: |
+          python - <<'EOF'
+          import pathlib, zipfile
           wheel = next(pathlib.Path('dist').glob('*.whl'))
           names = zipfile.ZipFile(wheel).namelist()
-          assert 'nori_sdk/py.typed' in names, f'py.typed missing from {wheel.name}: {names}'
+          assert 'nori_sdk/py.typed' in names, f'py.typed missing from {wheel.name}'
           print(f'{wheel.name} ships py.typed and {len(names)} entries')
-          "
+          EOF
       - uses: actions/upload-artifact@v4
         with:
           name: dist
