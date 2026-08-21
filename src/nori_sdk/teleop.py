@@ -43,7 +43,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
 from typing import Any, Self
 
-from . import protocol
+from . import protocol, webrtc_compat
 from .signaling import (
     IcePayload,
     NackPayload,
@@ -535,19 +535,34 @@ class RemoteTeleop:
 
             self._log("offer received; building fresh peer and answering")
             pc = await self._fresh_peer()
-            await pc.setRemoteDescription(RTCSessionDescription(sdp=payload.sdp, type="offer"))
+            # webrtcbin interop: a fresh gateway can offer H264 without its fmtp
+            # line, which aiortc mis-defaults to packetization-mode=0 and then
+            # rejects outright (hardware-confirmed 2026-08-21; see webrtc_compat).
+            await pc.setRemoteDescription(
+                RTCSessionDescription(
+                    sdp=webrtc_compat.ensure_h264_fmtp(payload.sdp), type="offer"
+                )
+            )
             self._remote_set = True
             for candidate in self._pending_ice:
                 with contextlib.suppress(Exception):
                     await pc.addIceCandidate(candidate)
             self._pending_ice.clear()
             answer = await pc.createAnswer()
-            # aiortc completes ICE gathering inside setLocalDescription, so by the time this
-            # returns our candidates are already in the SDP — nothing to trickle outbound.
+            # aiortc completes ICE gathering inside setLocalDescription, so by the time
+            # this returns our candidates are already in the SDP...
             await pc.setLocalDescription(answer)
             self._signaling.send_sdp(
                 SdpPayload(type="answer", sdp=pc.localDescription.sdp)
             )
+            # ...but webrtcbin IGNORES in-SDP candidates — it only consumes ones
+            # delivered via the signaling `ice` event. Without this trickle the
+            # robot never learns a single operator candidate and ICE fails
+            # (hardware-confirmed 2026-08-21).
+            for mline, cand in webrtc_compat.local_candidates(pc.localDescription.sdp):
+                self._signaling.send_ice(
+                    IcePayload(candidate=cand, sdp_mline_index=mline)
+                )
             self._log("answer sent")
         except Exception as e:
             # This runs inside a transport callback, where a raise would become an
@@ -610,6 +625,11 @@ class RemoteTeleop:
         """A NEW RTCPeerConnection per offer. The robot restarts its pipeline on every
         session, so reusing a peer across offers leaves stale transceivers behind."""
         from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection
+
+        # webrtcbin interop: GStreamer's dtls cert is RSA; aiortc's default cipher
+        # list is ECDSA-only and the handshake dies instantly without this
+        # (hardware-confirmed 2026-08-21; see webrtc_compat). Idempotent.
+        webrtc_compat.widen_dtls_ciphers()
 
         if self._pc is not None:
             with contextlib.suppress(Exception):
