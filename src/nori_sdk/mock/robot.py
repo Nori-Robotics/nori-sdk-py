@@ -134,7 +134,20 @@ class MockRobot:
         self.estopped = False
         self.jog: dict[str, Any] = {}
         self.action: dict[str, float] = {}
-        self.pose: dict[str, float] = {}  # integrated by step(); what telemetry() reports
+        # Integrated by step(); what telemetry() reports. Seeded with every joint
+        # the descriptor advertises (at 0.0, mid-range by norm convention) plus a
+        # mid-travel central lift when one is advertised — because that is what a
+        # REAL gateway does: it reports every calibrated joint from the first
+        # telemetry frame, commanded or not. The unseeded mock taught a policy
+        # exactly the wrong lesson (hardware-found 2026-08-22: a policy's
+        # telemetry-ready poll passed on the base keys alone, then KeyError'd on
+        # an arm joint the real robot would always have sent).
+        self.pose: dict[str, float] = {}
+        for key in (descriptor or {}).get("joints", []) or []:
+            self.pose[key] = 0.0
+        if "lift" in ((descriptor or {}).get("aux", []) or []):
+            low, high = (descriptor or {}).get("ranges", {}).get("lift.pos", (0.0, 720.0))
+            self.pose["lift.pos"] = round((float(low) + float(high)) / 2.0, 1)
         self.watchdog = "ok"  # "ok" | "warn" | "stop", driven by control-frame silence
         self._elapsed = 0.0  # seconds accumulated via step(); the double's whole clock
         self._last_control_at = 0.0

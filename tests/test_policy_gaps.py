@@ -88,10 +88,11 @@ async def test_mock_a3_integrates_central_lift_in_millimeters() -> None:
     async with mock_session(bot) as robot:
         info = await robot.wait_ready()
         assert info.descriptor is not None and "lift" in info.descriptor.aux
+        start = bot.pose["lift.pos"]  # seeded mid-travel (360), like a real robot
         await robot.jog(JogBuilder(info.descriptor).central_lift(1.0).build(), duration=0.5)
-        # ~0.5 s at full rate = ~CENTRAL_LIFT_MM_PER_S/2 mm, clamped to [0, 720]
-        pos = bot.pose.get("lift.pos", 0.0)
-        assert 0.0 < pos <= CENTRAL_LIFT_MM_PER_S  # moved, in mm scale, within range
+        # ~0.5 s at full rate = ~CENTRAL_LIFT_MM_PER_S/2 mm upward from the seed
+        moved = bot.pose["lift.pos"] - start
+        assert 0.0 < moved <= CENTRAL_LIFT_MM_PER_S  # moved up, in mm scale
 
 
 # --- snapshot_png ----------------------------------------------------------------------------
@@ -158,3 +159,24 @@ async def test_strict_allows_motion_on_a_healthy_session() -> None:
         await robot.wait_ready()
         await robot.action({"left_arm_shoulder_pan.pos": 10.0})  # no raise
         await robot.hold(100.0)
+
+
+def test_mock_pose_seeded_from_descriptor() -> None:
+    """A real gateway reports every calibrated joint from the first telemetry
+    frame; the mock must too, or a policy's readiness poll passes on the base
+    keys alone and then KeyErrors on an arm joint (hardware-found 2026-08-22)."""
+    from nori_sdk.mock import A3_DESCRIPTOR
+    from nori_sdk.mock.robot import DEFAULT_DESCRIPTOR, MockRobot
+
+    a3 = MockRobot(descriptor=A3_DESCRIPTOR)
+    for key in A3_DESCRIPTOR["joints"]:
+        assert a3.pose[key] == 0.0
+    assert a3.pose["lift.pos"] == 360.0  # mid-travel of [0, 720]
+
+    l2 = MockRobot(descriptor=DEFAULT_DESCRIPTOR)
+    for key in DEFAULT_DESCRIPTOR["joints"]:
+        assert l2.pose[key] == 0.0
+    assert "lift.pos" not in l2.pose  # no central lift advertised
+
+    bare = MockRobot(descriptor=None)  # legacy robot: nothing to seed
+    assert bare.pose == {}
