@@ -398,6 +398,21 @@ class RemoteTeleop:
         future: asyncio.Future[ActionStatus] = asyncio.get_running_loop().create_future()
         self._pending_actions[action_id] = future
         self._send(protocol.control_action(self._next_seq(), targets, action_id))
+
+        # Feed the watchdog while the arm PHYSICALLY TRAVELS. One frame then
+        # silence starves the robot's dead-man past t_stop (500 ms LAN / 1 s
+        # WAN): it drops the latched target mid-flight and answers "timeout"
+        # for any move slower than that — which is MOST real arm moves.
+        # Hardware-found 2026-08-22, first live agent0 run: the first slow
+        # untuck move died at exactly the WAN t_stop. An empty jog is the
+        # robot-pinned keep-alive that cancels nothing (same one hold() uses).
+        async def _feed() -> None:
+            interval = 1.0 / JOG_HZ
+            while True:
+                await asyncio.sleep(interval)
+                self._send(protocol.control_jog(self._next_seq(), {}))
+
+        feeder = self._spawn(_feed())
         try:
             return await asyncio.wait_for(future, timeout)
         except TimeoutError:
@@ -406,6 +421,7 @@ class RemoteTeleop:
                 f"(daemon status: {self._daemon.state if self._daemon else 'unknown'})"
             ) from None
         finally:
+            feeder.cancel()
             self._pending_actions.pop(action_id, None)
 
     def estop(self) -> None:

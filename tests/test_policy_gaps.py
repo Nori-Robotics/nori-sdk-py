@@ -180,3 +180,44 @@ def test_mock_pose_seeded_from_descriptor() -> None:
 
     bare = MockRobot(descriptor=None)  # legacy robot: nothing to seed
     assert bare.pose == {}
+
+
+@pytest.mark.asyncio
+async def test_action_wait_feeds_the_watchdog_while_traveling(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """One action frame then silence starves the robot's dead-man during any
+    move slower than t_stop — the robot drops the target mid-flight and
+    answers timeout (hardware-found 2026-08-22, first live agent0 run).
+    action(wait=True) must stream the empty-jog keep-alive until terminal."""
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot) as robot:
+        await robot.wait_ready()
+
+        # Hold the action_status back so the wait genuinely spans time.
+        real_handle = robot._handle_frame
+        parked: list = []
+
+        def gate_frames(frame: str) -> None:
+            if '"action_status"' in frame:
+                parked.append(frame)
+                return
+            real_handle(frame)
+
+        robot._handle_frame = gate_frames  # type: ignore[method-assign]
+        sent_before = len(bot.received)
+        task = asyncio.get_running_loop().create_task(
+            robot.action({"right_arm_elbow_pitch.pos": 20.0}, wait=True, timeout=5.0)
+        )
+        await asyncio.sleep(1.2)  # > WAN t_stop
+        keepalives = [
+            f for f in bot.received[sent_before:]
+            if f.get("type") == "control" and f.get("jog") == {}
+        ]
+        assert len(keepalives) >= 10, f"only {len(keepalives)} keep-alives in 1.2s"
+        assert bot.watchdog != "stop"
+        robot._handle_frame = real_handle  # type: ignore[method-assign]
+        for frame in parked:
+            real_handle(frame)
+        status = await task
+        assert status is not None and status.done
