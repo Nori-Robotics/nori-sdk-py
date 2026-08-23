@@ -61,6 +61,7 @@ async def mock_session(
     robot: MockRobot | None = None,
     *,
     telemetry_hz: float = TELEMETRY_HZ,
+    strict: bool = False,
 ) -> AsyncIterator[RemoteTeleop]:
     """A connected RemoteTeleop backed by `robot` (a fresh MockRobot by default).
 
@@ -79,7 +80,9 @@ async def mock_session(
     `telemetry_hz=0` to drive it yourself with `robot_double.telemetry(...)`."""
     bot = MockRobot() if robot is None else robot
     operator, _robot_side = loopback_pair()
-    teleop = RemoteTeleop(operator)
+    # strict flows through so a policy developed here rehearses the same raise-on-dead
+    # behavior the harness runs with on hardware (see RemoteTeleop(strict=...)).
+    teleop = RemoteTeleop(operator, strict=strict)
 
     # Deliberately NOT teleop.start(): that requires aiortc and would try to negotiate. We
     # assemble the post-negotiation state directly, which is the whole point of the double.

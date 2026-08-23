@@ -43,7 +43,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
 from typing import Any, Self
 
-from . import protocol
+from . import protocol, webrtc_compat
 from .signaling import (
     IcePayload,
     NackPayload,
@@ -90,6 +90,7 @@ class RemoteTeleop:
         turn_credential: str = "",
         protocol_version: int | None = None,
         on_log: Callable[[str], None] | None = None,
+        strict: bool = False,
     ) -> None:
         self._signaling = signaling
         self._stun = list(stun)
@@ -98,6 +99,13 @@ class RemoteTeleop:
         self._turn_credential = turn_credential
         self._protocol_version = protocol_version
         self._log_cb = on_log
+        # strict=True makes motion verbs RAISE instead of commanding into the void.
+        # Two silent-drop paths exist by default: _send() drops when the channel is
+        # closed, and a robot whose motion stack is down drops control frames with no
+        # error (daemon_status.online=False). Both defaults are right for interactive
+        # drivers (a UI shows the state) and wrong for an unattended policy, which
+        # would otherwise "succeed" against a dead robot. Policies/harnesses set it.
+        self._strict = strict
 
         # --- live state (all read-only to callers, via properties) ---
         self._status = ConnectStatus()
@@ -272,6 +280,7 @@ class RemoteTeleop:
         Streaming is not an optimization: the robot treats silence as "the operator is
         gone" and stops. That is the dead-man behavior, so never try to hold a motion by
         sending a single frame and sleeping."""
+        self._require_live("jog")
         if duration <= 0:
             self._send(protocol.control_jog(self._next_seq(), payload))
             return
@@ -281,6 +290,42 @@ class RemoteTeleop:
             self._send(protocol.control_jog(self._next_seq(), payload))
             await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))
         self._send(protocol.control_jog(self._next_seq(), _zeroed(payload)))
+
+    async def hold(self, ms: float) -> None:
+        """Hold position for `ms` milliseconds while keeping the watchdog fed.
+
+        This is the pause primitive a policy needs between commands. Plain
+        `asyncio.sleep` is WRONG here: control-frame silence past the watchdog's
+        t_stop_ms (500 ms LAN / 1000 ms WAN) puts the robot in safe_hold and DROPS
+        all commanded intent — a stale target never self-resumes, so the move you
+        commanded before the sleep quietly dies. hold() streams an empty jog at
+        JOG_HZ instead: an explicit all-stop for rate motion that leaves latched
+        `action` targets in place (the robot pins that: a zero jog must not cancel
+        an action), so the arm keeps holding pose while the dead-man clock is fed.
+
+        Like jog(), this owns the repetition for its duration — do not run it
+        concurrently with set_jog()."""
+        await self.jog({}, duration=ms / 1000.0)
+
+    def _require_live(self, verb: str) -> None:
+        """strict-mode gate: motion must never command into the void undetected.
+
+        Raises only in strict mode, and only on the two KNOWN-dead states: the
+        session is not connected (frames would be silently dropped client-side) or
+        the robot has said its motion stack is down (daemon_status.online=False —
+        frames arrive and are silently dropped robot-side). A daemon_status that
+        simply hasn't arrived yet (None) passes: the first commands of a session
+        race the first status frame, and "unknown" is not "known dead"."""
+        if not self._strict:
+            return
+        if self._stopped or not self.is_connected:
+            raise TeleopError(f"{verb}: session is not connected (strict mode)")
+        daemon = self._daemon
+        if daemon is not None and not daemon.online:
+            raise TeleopError(
+                f"{verb}: robot motion stack is offline (strict mode): "
+                f"{getattr(daemon, 'detail', '') or 'daemon_status.online=false'}"
+            )
 
     def set_jog(self, payload: dict[str, Any] | None) -> None:
         """Set the continuously streamed jog — the keyboard-held model.
@@ -300,6 +345,8 @@ class RemoteTeleop:
             protocol.control_jog(…)   YOU repeat, inside t_warn_ms, or the robot stops
 
         Use set_jog for interactive drivers, jog() for scripts."""
+        if payload is not None:
+            self._require_live("set_jog")
         self._jog_payload = payload
         if payload is None:
             return
@@ -337,10 +384,13 @@ class RemoteTeleop:
         clamped, blocked or timeout. The intermediate "accepted" and "active" frames are not
         it: "accepted" only means the robot validated the target. Check `.succeeded` for
         "reached what I asked for"; `.done` is true for clamped and blocked too.
+        In strict mode this raises up front when the session is disconnected or the robot's
+        motion stack is offline, instead of timing out against a robot that never heard you.
 
         The timeout here is the CLIENT's patience. The robot runs its own per-action deadline
         and answers "timeout" when it expires, so a TeleopError from this call means no reply
         arrived at all — a dead channel or an offline motion stack — not a slow move."""
+        self._require_live("action")
         if not wait:
             self._send(protocol.control_action(self._next_seq(), targets))
             return None
@@ -498,6 +548,20 @@ class RemoteTeleop:
             int(y * height) : int((y + h) * height), int(x * width) : int((x + w) * width)
         ]
 
+    async def snapshot_png(self, role: str | None = None, settle: float = 0.3) -> bytes:
+        """One frame as PNG file bytes — the shape a trial-artifact writer wants.
+
+        Same semantics as snapshot(); the whole composite is encoded when `role`
+        is None or the robot has no layout. Save with a lowercase `.png` suffix —
+        downstream consumers map media type from the extension. Prefer per-role
+        crops for VLM consumption (a full composite is bigger than any judgment
+        needs; API-side image caps are per-image)."""
+        from . import _png
+
+        frame = await self.snapshot(role=role, settle=settle)
+        image = frame if hasattr(frame, "shape") else frame.to_ndarray(format="rgb24")
+        return _png.encode_rgb24(image)
+
     # --- events ----------------------------------------------------------------------------
 
     def on(self, kind: str, callback: Callable[[Any], Any]) -> Callable[[], None]:
@@ -583,19 +647,34 @@ class RemoteTeleop:
 
             self._log("offer received; building fresh peer and answering")
             pc = await self._fresh_peer()
-            await pc.setRemoteDescription(RTCSessionDescription(sdp=payload.sdp, type="offer"))
+            # webrtcbin interop: a fresh gateway can offer H264 without its fmtp
+            # line, which aiortc mis-defaults to packetization-mode=0 and then
+            # rejects outright (hardware-confirmed 2026-08-21; see webrtc_compat).
+            await pc.setRemoteDescription(
+                RTCSessionDescription(
+                    sdp=webrtc_compat.ensure_h264_fmtp(payload.sdp), type="offer"
+                )
+            )
             self._remote_set = True
             for candidate in self._pending_ice:
                 with contextlib.suppress(Exception):
                     await pc.addIceCandidate(candidate)
             self._pending_ice.clear()
             answer = await pc.createAnswer()
-            # aiortc completes ICE gathering inside setLocalDescription, so by the time this
-            # returns our candidates are already in the SDP — nothing to trickle outbound.
+            # aiortc completes ICE gathering inside setLocalDescription, so by the time
+            # this returns our candidates are already in the SDP...
             await pc.setLocalDescription(answer)
             self._signaling.send_sdp(
                 SdpPayload(type="answer", sdp=pc.localDescription.sdp)
             )
+            # ...but webrtcbin IGNORES in-SDP candidates — it only consumes ones
+            # delivered via the signaling `ice` event. Without this trickle the
+            # robot never learns a single operator candidate and ICE fails
+            # (hardware-confirmed 2026-08-21).
+            for mline, cand in webrtc_compat.local_candidates(pc.localDescription.sdp):
+                self._signaling.send_ice(
+                    IcePayload(candidate=cand, sdp_mline_index=mline)
+                )
             self._log("answer sent")
         except Exception as e:
             # This runs inside a transport callback, where a raise would become an
@@ -658,6 +737,11 @@ class RemoteTeleop:
         """A NEW RTCPeerConnection per offer. The robot restarts its pipeline on every
         session, so reusing a peer across offers leaves stale transceivers behind."""
         from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection
+
+        # webrtcbin interop: GStreamer's dtls cert is RSA; aiortc's default cipher
+        # list is ECDSA-only and the handshake dies instantly without this
+        # (hardware-confirmed 2026-08-21; see webrtc_compat). Idempotent.
+        webrtc_compat.widen_dtls_ciphers()
 
         if self._pc is not None:
             with contextlib.suppress(Exception):

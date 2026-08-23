@@ -22,14 +22,14 @@ from typing import Any
 from .types import RobotDescriptor
 
 # Wire group names for the nested `jog` payload. Arms and base take a dict of DOF -> rate;
-# the lifts take a bare float because a robot has one lift per arm, not a joint group.
+# lifts take a bare float. Two lift shapes exist in the fleet: the L-series has one lift
+# PER ARM (left_lift/right_lift), the A-series has ONE central telescoping lift whose wire
+# key is bare "lift" and whose telemetry is "lift.pos" in millimeters. A robot advertises
+# which it has via descriptor.aux; absence of a lift key in a jog always reads as rate 0
+# robot-side, so stop() never needs to name a lift the robot doesn't have.
 ARM_GROUPS = ("left_arm", "right_arm")
 LIFT_GROUPS = ("left_lift", "right_lift")
-# A3 carries ONE central telescoping lift rather than L2's pair, and addresses it with a bare
-# "lift". The jog vocabulary for it is not settled upstream yet, so nothing here builds an A3
-# lift frame -- this name exists only so jog_rate() can answer for a robot that publishes a
-# single lift scale. See MODELS.md.
-LIFT_GROUP = "lift"
+CENTRAL_LIFT_GROUP = "lift"
 BASE_GROUP = "base"
 
 
@@ -109,8 +109,33 @@ class JogBuilder:
             and group not in self._descriptor.aux
             and not any(group in key for key in self._descriptor.joints)
         ):
-            raise ValueError(f"this robot has no {group}")
+            hint = (
+                " (this robot advertises a single central lift — use central_lift())"
+                if self._descriptor is not None
+                and CENTRAL_LIFT_GROUP in self._descriptor.aux
+                else ""
+            )
+            raise ValueError(f"this robot has no {group}{hint}")
         self._payload[group] = clamp(rate)
+        return self
+
+    def central_lift(self, rate: float) -> JogBuilder:
+        """The single central telescoping lift (A-series): bare scalar under jog
+        key "lift", telemetry key "lift.pos" in millimeters. No `side` — there is
+        one column. In strict mode the robot must advertise it (`"lift"` in
+        descriptor.aux); the L-series per-arm rails are lift(side, rate)."""
+        if (
+            self._strict
+            and self._descriptor is not None
+            and CENTRAL_LIFT_GROUP not in self._descriptor.aux
+        ):
+            hint = (
+                " (this robot has per-arm lifts — use lift(side, rate))"
+                if any(g in self._descriptor.aux for g in LIFT_GROUPS)
+                else ""
+            )
+            raise ValueError(f'this robot has no central lift{hint}')
+        self._payload[CENTRAL_LIFT_GROUP] = clamp(rate)
         return self
 
     def base(
@@ -155,8 +180,8 @@ class JogBuilder:
         session's dead-man clock fed."""
         payload: dict[str, Any] = {}
         for group in groups:
-            if group in LIFT_GROUPS:
-                payload[group] = 0.0
+            if group in LIFT_GROUPS or group == CENTRAL_LIFT_GROUP:
+                payload[group] = 0.0  # every lift shape is a bare scalar on the wire
             elif group == BASE_GROUP:
                 # Explicit zeros rather than {}. Both stop the robot — absence of a base key
                 # reads as zero — but the arms cannot do this (their DOF names are per-robot,
@@ -205,7 +230,7 @@ def jog_rate(descriptor: RobotDescriptor | None, group: str, dof: str = "") -> f
     if descriptor is None or descriptor.jog_scale is None:
         return None
     scale = descriptor.jog_scale
-    if group == LIFT_GROUP or group in LIFT_GROUPS:
+    if group == CENTRAL_LIFT_GROUP or group in LIFT_GROUPS:
         return scale.lift
     if group == BASE_GROUP:
         return scale.base.get(dof)
@@ -241,7 +266,7 @@ def normalized_for(
 __all__ = [
     "ARM_GROUPS",
     "BASE_GROUP",
-    "LIFT_GROUP",
+    "CENTRAL_LIFT_GROUP",
     "LIFT_GROUPS",
     "JogBuilder",
     "clamp",
