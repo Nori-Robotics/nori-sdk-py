@@ -151,6 +151,36 @@ MUTATIONS = [
         'JOG_SCALE = 40.0',
         'JOG_SCALE = 40.0\nSNEAKY_PUBLIC_CONSTANT = 1',
     ),
+    (
+        '11. jog_scale silently dropped from the descriptor parse',
+        'src/nori_sdk/types.py',
+        'jog_scale=JogScale.from_wire(obj.get("jog_scale")),',
+        'jog_scale=None,',
+    ),
+    (
+        '11b. an unadvertised rate is guessed instead of returning None',
+        'src/nori_sdk/motion.py',
+        '    if descriptor is None or descriptor.jog_scale is None:\n        return None',
+        '    if descriptor is None or descriptor.jog_scale is None:\n        return 1.0',
+    ),
+    (
+        '11c. task verbs resolved through the joint map',
+        'src/nori_sdk/motion.py',
+        '        if dof in scale.task:\n            return scale.task[dof]',
+        '        if False:\n            return scale.task[dof]',
+    ),
+    (
+        '11d. a published rate of 0 is believed rather than dropped',
+        'src/nori_sdk/types.py',
+        'and not isinstance(x, bool) and x > 0',
+        'and not isinstance(x, bool)',
+    ),
+    (
+        '11e. normalized_for stops clamping to full deflection',
+        'src/nori_sdk/motion.py',
+        '    return clamp(rate / full)',
+        '    return rate / full',
+    ),
 ]
 
 

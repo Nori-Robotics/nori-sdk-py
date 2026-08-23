@@ -100,6 +100,68 @@ class WatchdogProfile:
 
 
 @dataclass(frozen=True)
+class JogScale:
+    """The multiplier from a normalized jog rate to real motion, per namespace.
+
+    NOMINAL COMMANDED scale, not achieved velocity. Three things routinely make the real rate
+    lower and a caller must expect all three: the watchdog's `warn` state scales all motion to
+    ZERO until control frames resume (watch `telemetry.watchdog`), an acceleration limit means
+    a short jog never reaches the rate, and stacks running MoveIt Servo scale it down near
+    singularities and collisions.
+
+    UNITS ARE PER NAMESPACE, each matching the thing it addresses so you can verify what you
+    got against telemetry:
+
+        joints  norm_mode units/s  — matches telemetry `state` and descriptor `ranges`
+        lift    mm/s               — matches the mm of `<side>_lift.pos` targets
+        task    m/s (x, y), rad/s (pitch, shoulder_pan)
+        base    m/s (linear), rad/s (angular)
+
+    Joints are deliberately NOT rad/s: telemetry reports normalized positions, so a rad/s rate
+    could not be checked against anything you can see. Expect per-joint values to differ even
+    where the robot uses one internal constant — the normalized-to-physical scale is per joint.
+
+    An empty mapping means the robot advertised that namespace but named no keys; a MISSING
+    key means unknown. Neither ever means zero."""
+
+    joints: dict[str, float] = field(default_factory=dict)
+    task: dict[str, float] = field(default_factory=dict)
+    base: dict[str, float] = field(default_factory=dict)
+    lift: float | None = None
+
+    @classmethod
+    def from_wire(cls, obj: Any) -> JogScale | None:
+        if not isinstance(obj, dict):
+            return None
+
+        def rates(key: str) -> dict[str, float]:
+            v = obj.get(key)
+            if not isinstance(v, dict):
+                return {}
+            # A non-positive rate is invalid per the schema: "cannot be jogged" is expressed
+            # by omitting the key, so a 0 here is a broken robot, not a slow one. Dropping it
+            # keeps "missing means unknown" true rather than handing back a zero that would
+            # silently scale every command to nothing.
+            return {
+                k: float(x)
+                for k, x in v.items()
+                if isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
+            }
+
+        lift = obj.get("lift")
+        return cls(
+            joints=rates("joints"),
+            task=rates("task"),
+            base=rates("base"),
+            lift=(
+                float(lift)
+                if isinstance(lift, (int, float)) and not isinstance(lift, bool) and lift > 0
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class RobotDescriptor:
     """What the robot physically is, straight from the robot. This is what makes the SDK
     model-agnostic: never hard-code a joint list, read it from here.
@@ -114,6 +176,13 @@ class RobotDescriptor:
     aux: list[str] = field(default_factory=list)  # extra actuators (e.g. "left_lift")
     cameras: list[str] = field(default_factory=list)  # roles; match the CameraLayout tiles
     ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+    # How a normalized jog rate converts to real motion on THIS robot. None means the robot
+    # did not advertise it — the L2 fleet is frozen and never will, so None is the common
+    # case. See motion.jog_rate()/normalized_for(). NOT achieved velocity: the watchdog's
+    # warn state scales motion to zero, acceleration limits mean short jogs never reach the
+    # rate, and Servo scales near singularities.
+    jog_scale: JogScale | None = None
 
     @classmethod
     def from_wire(cls, obj: Any) -> RobotDescriptor | None:
@@ -139,6 +208,7 @@ class RobotDescriptor:
             aux=strs("aux"),
             cameras=strs("cameras"),
             ranges=ranges,
+            jog_scale=JogScale.from_wire(obj.get("jog_scale")),
         )
 
 
@@ -548,6 +618,7 @@ __all__ = [
     "ConnectStatus",
     "ControlMode",
     "DaemonStatus",
+    "JogScale",
     "LinkMode",
     "Perception",
     "PolicyStreamStatus",

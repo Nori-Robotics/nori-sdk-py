@@ -25,6 +25,11 @@ from .types import RobotDescriptor
 # the lifts take a bare float because a robot has one lift per arm, not a joint group.
 ARM_GROUPS = ("left_arm", "right_arm")
 LIFT_GROUPS = ("left_lift", "right_lift")
+# A3 carries ONE central telescoping lift rather than L2's pair, and addresses it with a bare
+# "lift". The jog vocabulary for it is not settled upstream yet, so nothing here builds an A3
+# lift frame -- this name exists only so jog_rate() can answer for a robot that publishes a
+# single lift scale. See MODELS.md.
+LIFT_GROUP = "lift"
 BASE_GROUP = "base"
 
 
@@ -178,14 +183,72 @@ def scale_to_range(
     return low + (high - low) * clamp(fraction, 0.0, 1.0)
 
 
+# --- calibrated rates ----------------------------------------------------------------------
+# The jog wire is normalized [-1, 1] and the robot owns what "full deflection" means. That is
+# what keeps one client working across models -- but it also means a script cannot ask for a
+# REPEATABLE speed, or discover what it just asked for. A robot that publishes
+# descriptor.jog_scale closes that without any new command.
+
+
+def jog_rate(descriptor: RobotDescriptor | None, group: str, dof: str = "") -> float | None:
+    """The rate this robot commands at FULL deflection, or None if it didn't advertise one.
+
+        jog_rate(d, "left_arm", "elbow_pitch")  -> 12.2   (norm units/s)
+        jog_rate(d, "base", "linear")           -> 0.15   (m/s)
+        jog_rate(d, "lift")                     -> 50.0   (mm/s)
+
+    None is the common answer and must be handled: the L2 fleet is frozen and will never
+    publish this. Units are per namespace -- see JogScale, and do not mix them up.
+
+    NOMINAL COMMANDED, not achieved. The watchdog's warn state scales motion to zero, an
+    acceleration limit means short jogs never reach the rate, and Servo scales near limits."""
+    if descriptor is None or descriptor.jog_scale is None:
+        return None
+    scale = descriptor.jog_scale
+    if group == LIFT_GROUP or group in LIFT_GROUPS:
+        return scale.lift
+    if group == BASE_GROUP:
+        return scale.base.get(dof)
+    if group in ARM_GROUPS:
+        # A task-space VERB ("x", "pitch") is not a joint and lives in its own table -- on
+        # some models "shoulder_pan" is a task verb and not a joint name at all.
+        if dof in scale.task:
+            return scale.task[dof]
+        return scale.joints.get(f"{group}_{dof}.pos")
+    return None
+
+
+def normalized_for(
+    descriptor: RobotDescriptor | None, group: str, dof: str = "", *, rate: float = 0.0
+) -> float | None:
+    """The normalized jog value that asks for `rate` real units per second.
+
+        normalized_for(d, "base", "linear", rate=0.075)  -> 0.5   (half of 0.15 m/s)
+
+    None when the robot published no scale for that DOF -- never a guess. Guessing is how a
+    client ends up commanding a number that means something else on the next model, which is
+    the entire reason the jog namespace is normalized in the first place.
+
+    The result is CLAMPED to [-1, 1]: asking for more than the robot's full deflection gives
+    you full deflection, not an out-of-range frame. Compare what you asked for against what
+    telemetry reports to find out whether you actually got it."""
+    full = jog_rate(descriptor, group, dof)
+    if full is None or full <= 0:
+        return None
+    return clamp(rate / full)
+
+
 __all__ = [
     "ARM_GROUPS",
     "BASE_GROUP",
+    "LIFT_GROUP",
     "LIFT_GROUPS",
     "JogBuilder",
     "clamp",
+    "jog_rate",
     "joint_group",
     "joint_short",
     "joints_by_group",
+    "normalized_for",
     "scale_to_range",
 ]

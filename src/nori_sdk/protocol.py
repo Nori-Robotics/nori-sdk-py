@@ -131,6 +131,48 @@ def control_action(seq: int, action: Action, action_id: str = "") -> dict[str, A
     return frame
 
 
+POSE_FRAME = "base_footprint"
+
+
+def control_pose(
+    seq: int,
+    side: str,
+    position_m: list[float] | tuple[float, ...],
+    orientation_xyzw: list[float] | tuple[float, ...] | None = None,
+    action_id: str = "",
+) -> dict[str, Any]:
+    """An absolute Cartesian pose target for one arm's gripper TCP, solved to joints ON THE
+    ROBOT (spec control.json `pose`; gate on the "pose_targets" capability).
+
+    The frame is named in every message and is always base_footprint today: fixed to the
+    robot, stable across lift travel. Metres, REP-103 (+x forward, +y left, +z up), and the
+    orientation — when you send one — is a ROS-order quaternion [x, y, z, w]. Omit it for
+    "get the gripper to this point, any wrist angle": the robot solves at its current
+    wrist, and forcing a full pose turns those tasks into avoidable IK failures.
+
+    ONE arm per frame: a control frame carries one action_id and arms fail independently,
+    so a dual-arm pose is two calls. Malformed vectors raise here rather than flying —
+    the robot would refuse them as `bad_pose` after a round trip."""
+    if side not in ("left", "right"):
+        raise ValueError(f"side must be 'left' or 'right', got {side!r}")
+    if len(position_m) != 3:
+        raise ValueError(f"position_m needs [x, y, z] metres, got {position_m!r}")
+    if orientation_xyzw is not None and len(orientation_xyzw) != 4:
+        raise ValueError(
+            f"orientation_xyzw needs [x, y, z, w], got {orientation_xyzw!r}")
+    target: dict[str, Any] = {
+        "frame": POSE_FRAME,
+        "position_m": [float(v) for v in position_m],
+    }
+    if orientation_xyzw is not None:
+        target["orientation_xyzw"] = [float(v) for v in orientation_xyzw]
+    frame: dict[str, Any] = {
+        "type": "control", "seq": seq, "pose": {f"{side}_arm": target}}
+    if action_id:
+        frame["action_id"] = action_id
+    return frame
+
+
 def control_leader(seq: int, leader_action_deg: dict[str, float]) -> dict[str, Any]:
     """Absolute pose from a physical leader arm. Keys are flat "<side>_arm_<joint>.pos";
     body joints are DEGREES around the calibrated leader zero, grippers normalized [0, 100].
@@ -283,9 +325,11 @@ __all__ = [
     "RecordVerb",
     "call",
     "command",
+    "POSE_FRAME",
     "control_action",
     "control_jog",
     "control_leader",
+    "control_pose",
     "control_reset",
     "decode",
     "encode",

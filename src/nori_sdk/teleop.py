@@ -358,6 +358,54 @@ class RemoteTeleop:
         finally:
             self._pending_actions.pop(action_id, None)
 
+    async def pose(
+        self,
+        side: str,
+        position_m: list[float] | tuple[float, ...],
+        orientation_xyzw: list[float] | tuple[float, ...] | None = None,
+        wait: bool = False,
+        timeout: float = 10.0,
+    ) -> ActionStatus | None:
+        """Command an absolute Cartesian pose for one arm's gripper TCP (metres, in
+        base_footprint). The robot solves IK on-board — the wire never carries joint
+        solutions — and tracks the result through the same latch `action` uses: a zero jog
+        does not cancel it, the watchdog drops it on control silence.
+
+        Capability-gated: this raises TeleopError when the robot EXPLICITLY does not
+        advertise `pose_targets` — a robot without it silently ignores the payload, and
+        silently accepting reads as a hung move. An ack predating capabilities entirely
+        (supports() is None) is allowed through: probe-and-see is the legacy contract.
+
+        Failure is a modelled reply on the awaited status, not an exception: `blocked`
+        with reason "no_ik_solution" (never retriable at this lift height), "ik_timeout"
+        (worth retrying), "limit:<joint>", "singularity", "collision", "lift_moved" (the
+        lift moved — re-send to re-solve at the new height), or "frame:<name>". The
+        intermediate "active" frame means solved-and-tracking; `.done` stays False until
+        a terminal state, and `.succeeded` is the "reached it" check."""
+        info = self._info
+        if info is not None and info.supports("pose_targets") is False:
+            raise TeleopError(
+                "this robot does not advertise the pose_targets capability — "
+                "a pose frame would be silently ignored")
+        if not wait:
+            self._send(protocol.control_pose(
+                self._next_seq(), side, position_m, orientation_xyzw))
+            return None
+        action_id = uuid.uuid4().hex[:12]
+        future: asyncio.Future[ActionStatus] = asyncio.get_running_loop().create_future()
+        self._pending_actions[action_id] = future
+        self._send(protocol.control_pose(
+            self._next_seq(), side, position_m, orientation_xyzw, action_id))
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            raise TeleopError(
+                f"no action_status for pose {action_id} within {timeout:.0f}s "
+                f"(daemon status: {self._daemon.state if self._daemon else 'unknown'})"
+            ) from None
+        finally:
+            self._pending_actions.pop(action_id, None)
+
     def estop(self) -> None:
         """Latch E-STOP. Motion stays blocked until reset_latch(). Deliberately synchronous
         and un-awaited: it must not be able to block behind anything."""

@@ -139,6 +139,12 @@ def test_control_action_validates():
     assert_valid(protocol.control_action(1, {"left_arm_gripper.pos": 30.0}, "abc123"))
 
 
+def test_control_pose_validates():
+    assert_valid(protocol.control_pose(2, "right", [0.4, -0.1, 0.9], action_id="p-1"))
+    assert_valid(protocol.control_pose(
+        3, "left", [0.3, 0.2, 0.7], [0.0, 0.7071068, 0.0, 0.7071068]))
+
+
 def test_command_validates():
     assert_valid(protocol.command("estop"))
     assert_valid(protocol.command("reset_latch"))

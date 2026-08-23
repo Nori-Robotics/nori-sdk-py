@@ -21,6 +21,29 @@ def test_control_action_omits_empty_action_id():
     assert protocol.control_action(1, {"a.pos": 1}, "abc")["action_id"] == "abc"
 
 
+def test_control_pose_names_the_frame_and_keeps_orientation_optional():
+    frame = protocol.control_pose(7, "right", [0.4, -0.1, 0.9], action_id="p1")
+    assert frame["pose"] == {"right_arm": {
+        "frame": "base_footprint", "position_m": [0.4, -0.1, 0.9]}}
+    assert frame["action_id"] == "p1"
+    with_wrist = protocol.control_pose(
+        8, "left", (0.3, 0.2, 0.7), (0.0, 0.7071068, 0.0, 0.7071068))
+    assert with_wrist["pose"]["left_arm"]["orientation_xyzw"] == [
+        0.0, 0.7071068, 0.0, 0.7071068]
+    assert "action_id" not in with_wrist
+
+
+def test_control_pose_rejects_malformed_vectors_before_they_fly():
+    import pytest
+
+    with pytest.raises(ValueError, match="side"):
+        protocol.control_pose(1, "middle", [0.1, 0.2, 0.3])
+    with pytest.raises(ValueError, match="position_m"):
+        protocol.control_pose(1, "right", [0.1, 0.2])
+    with pytest.raises(ValueError, match="orientation_xyzw"):
+        protocol.control_pose(1, "right", [0.1, 0.2, 0.3], [0.0, 0.0, 1.0])
+
+
 def test_command_is_a_flag_not_a_name():
     # The robot accepts {"name": "estop"} too, but the SDK dialect is the flag form; the
     # gateway checks `message.get("estop")` first.

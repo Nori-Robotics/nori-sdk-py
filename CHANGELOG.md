@@ -4,7 +4,60 @@ Newest first. This package is pre-release: it targets **nori-protocol v1** and i
 verified against a physical robot — see the Status section of `README.md` for what that means
 in practice.
 
+## Unreleased — 2026-08-23
+
+### Cartesian pose targets — `RemoteTeleop.pose()` (spec: `control.pose`, PROPOSED)
+
+`pose(side, position_m, orientation_xyzw=None, wait=False)` commands an absolute gripper-TCP
+pose in `base_footprint` (metres, REP-103; optional ROS-order quaternion — omit it for "any
+wrist angle"). The robot solves IK on-board and tracks through the same latch `action` uses,
+answering on the shared `action_status` lifecycle — including the intermediate `active`
+(solved, tracking) and a modelled failure vocabulary (`no_ik_solution`, `ik_timeout`,
+`limit:<joint>`, `singularity`, `collision`, `lift_moved`, `frame:<name>`).
+
+Gated on the `pose_targets` capability: explicitly-unsupported robots raise `TeleopError`
+instead of a silent 10 s no-op (the payload would be ignored on the wire); a legacy ack with
+no capabilities field is allowed through, per the probe-or-assume-legacy contract. New
+builder `protocol.control_pose()` + `protocol.POSE_FRAME`; additive, no version bump.
+
 ## Unreleased — 2026-08-20
+
+### Calibrated jog rates — `descriptor.jog_scale`
+
+A jog is normalized `[-1,1]` and the robot owns what full deflection means, which is what
+keeps one client working across models. The cost was that a script could not ask for a
+REPEATABLE speed or discover what it just asked for. This closes that without adding a
+velocity command — the robot still owns the envelope.
+
+- **Protocol** (`Nori-Protocol`): `descriptor.jog_scale`, optional and additive, so no version
+  bump and no client breaks. Namespaced `joints` / `task` / `base` / `lift`, because a flat map
+  cannot express that `x` and `pitch` are task-space VERBS rather than joints — `shoulder_pan`
+  is not even a joint name on every model. Two fixtures (full A3, arms-only partial); 44
+  fixtures / 17 schemas / 0 failures.
+- **Units are per namespace, each matching the thing it addresses**, so a client can verify
+  what it got: joints in norm_mode units/s (matching `telemetry.state` and `ranges`), lift in
+  mm/s (matching `<side>_lift.pos`), task and base in SI. **Joints are deliberately NOT
+  rad/s** — telemetry reports normalized positions, so a rad/s figure could not be checked
+  against anything a client can see, and verifiability was the entire point.
+- **It promises the NOMINAL COMMANDED scale, not achieved velocity**, and says so in the
+  schema. Three things routinely make the real rate lower: the watchdog's `warn` state scales
+  all motion to ZERO, an acceleration limit means short jogs never reach the rate, and MoveIt
+  Servo scales near singularities.
+- **Omission means UNKNOWN at every level** — missing block, missing namespace, missing key. A
+  rate of `0` is schema-invalid rather than meaning "cannot move"; that is expressed by leaving
+  the key out. The parser drops a non-positive rate rather than believing it, since a zero that
+  survived would silently scale every command to nothing.
+- **SDK**: `JogScale` on `RobotDescriptor`, plus `motion.jog_rate()` and
+  `motion.normalized_for()`. Both return `None` rather than guessing — the L2 fleet is frozen
+  and will never publish this, so `None` is the common answer and callers must handle it.
+- **`tools/measure_jog_scale.py`** — the part that makes the numbers true. Publishing the
+  gateway's constants would be moving a number onto the wire and calling it verified; if the
+  accel limit, the target leash and Servo mean steady-state is 0.72 where the constant says
+  0.8, then 0.8 is a lie with a decimal point on it. The tool fits steady-state rate per joint
+  per direction, discards the acceleration ramp, refuses runs that leave the middle of the
+  advertised range or that arrive while the watchdog is degraded, rejects non-linear runs by
+  R², takes a median across runs and **refuses to publish a joint whose spread exceeds 20%**.
+  Rehearsed against the mock, where it recovers the known `JOG_SCALE = 40.0` as 39.33.
 
 ### Public API surface audited and pinned
 
