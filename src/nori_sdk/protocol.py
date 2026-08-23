@@ -184,6 +184,26 @@ def control_leader(seq: int, leader_action_deg: dict[str, float]) -> dict[str, A
     return {"type": "control", "seq": seq, "leader_action_deg": leader_action_deg}
 
 
+def control_pose(seq: int, side: str, position_m: list[float],
+                 orientation_xyzw: list[float] | None = None,
+                 action_id: str = "") -> dict[str, Any]:
+    """A Cartesian pose target (capability `pose_targets`), solved on-robot by
+    IK into the same latched-target path as `action`. ONE arm per frame; the
+    reply lifecycle rides action_status (accepted -> active -> done | blocked
+    | timeout, terminal states from OBSERVED joint motion). Frame is pinned to
+    base_footprint (REP-103). Omitted orientation = keep the CURRENT tcp
+    orientation. Reference implementation: nori_gateway 3b55c78."""
+    target: dict[str, Any] = {"frame": "base_footprint",
+                              "position_m": [float(v) for v in position_m]}
+    if orientation_xyzw is not None:
+        target["orientation_xyzw"] = [float(v) for v in orientation_xyzw]
+    frame: dict[str, Any] = {"type": "control", "seq": seq,
+                             "pose": {f"{side}_arm": target}}
+    if action_id:
+        frame["action_id"] = action_id
+    return frame
+
+
 def control_reset(arm: str) -> dict[str, Any]:
     """Clear the per-arm latch/target state. Note this rides `control`, not `command`."""
     return {"type": "control", "reset": {arm: True}}
