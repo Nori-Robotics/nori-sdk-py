@@ -428,44 +428,11 @@ class RemoteTeleop:
                         orientation_xyzw: list[float] | None = None,
                         wait: bool = True,
                         timeout: float = 15.0) -> ActionStatus | None:
-        """Cartesian pose target (capability `pose_targets`): the robot solves
-        IK and executes through the same latched path as action(). Frame is
-        base_footprint (REP-103, meters); omitted orientation keeps the tcp's
-        current orientation. Returns the terminal ActionStatus (done | blocked
-        | timeout — blocked reasons are structured: no_ik*, bad_pose,
-        superseded, ...). Robots that predate the verb never reply: gate on
-        `"pose_targets" in info.capabilities` and treat a client-side
-        TeleopError timeout as "robot too old", not "unreachable pose".
-
-        In strict mode raises up front when disconnected / daemon offline."""
-        self._require_live("goto_pose")
-        action_id = uuid.uuid4().hex[:12]
-        if not wait:
-            self._send(protocol.control_pose(
-                self._next_seq(), side, position_m, orientation_xyzw, action_id))
-            return None
-        future: asyncio.Future[ActionStatus] = asyncio.get_running_loop().create_future()
-        self._pending_actions[action_id] = future
-        self._send(protocol.control_pose(
-            self._next_seq(), side, position_m, orientation_xyzw, action_id))
-
-        async def _feed() -> None:
-            interval = 1.0 / JOG_HZ
-            while True:
-                await asyncio.sleep(interval)
-                self._send(protocol.control_jog(self._next_seq(), {}))
-
-        feeder = self._spawn(_feed())
-        try:
-            return await asyncio.wait_for(future, timeout)
-        except TimeoutError:
-            raise TeleopError(
-                f"no action_status for pose {action_id} within {timeout:.0f}s "
-                f"(daemon status: {self._daemon.state if self._daemon else 'unknown'})"
-            ) from None
-        finally:
-            feeder.cancel()
-            self._pending_actions.pop(action_id, None)
+        """Alias for pose() with await-the-move defaults (wait=True, a
+        patience sized for real arm travel). Kept for callers written against
+        the pre-0b52e81 name; new code calls pose() directly."""
+        return await self.pose(side, position_m, orientation_xyzw,
+                               wait=wait, timeout=timeout)
 
     async def pose(
         self,
@@ -490,7 +457,12 @@ class RemoteTeleop:
         (worth retrying), "limit:<joint>", "singularity", "collision", "lift_moved" (the
         lift moved — re-send to re-solve at the new height), or "frame:<name>". The
         intermediate "active" frame means solved-and-tracking; `.done` stays False until
-        a terminal state, and `.succeeded` is the "reached it" check."""
+        a terminal state, and `.succeeded` is the "reached it" check.
+
+        With wait=True the empty-jog keep-alive streams for the whole await —
+        see the comment in action(); a pose move is exactly the shape that
+        starves the dead-man (one frame, then seconds of physical travel)."""
+        self._require_live("pose")
         info = self._info
         if info is not None and info.supports("pose_targets") is False:
             raise TeleopError(
@@ -505,6 +477,20 @@ class RemoteTeleop:
         self._pending_actions[action_id] = future
         self._send(protocol.control_pose(
             self._next_seq(), side, position_m, orientation_xyzw, action_id))
+
+        # Same dead-man arithmetic as action(wait=True): the single pose frame
+        # latches a target the arm then takes SECONDS to reach, and silence
+        # past t_stop (500 ms LAN / 1 s WAN) makes the watchdog drop it
+        # mid-flight — the move dies as a phantom "timeout". The empty jog is
+        # the robot-pinned keep-alive that commands nothing and, per the
+        # gateway contract, does not cancel a pose latch.
+        async def _feed() -> None:
+            interval = 1.0 / JOG_HZ
+            while True:
+                await asyncio.sleep(interval)
+                self._send(protocol.control_jog(self._next_seq(), {}))
+
+        feeder = self._spawn(_feed())
         try:
             return await asyncio.wait_for(future, timeout)
         except TimeoutError:
@@ -513,6 +499,7 @@ class RemoteTeleop:
                 f"(daemon status: {self._daemon.state if self._daemon else 'unknown'})"
             ) from None
         finally:
+            feeder.cancel()
             self._pending_actions.pop(action_id, None)
 
     def estop(self) -> None:

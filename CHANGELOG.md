@@ -6,6 +6,20 @@ in practice.
 
 ## Unreleased — 2026-08-23
 
+### `pose(wait=True)` no longer starves the watchdog; `goto_pose` is now an alias
+
+A pose frame latches a target the arm takes SECONDS to reach, and `pose(wait=True)` sent that
+one frame and then awaited in silence — control silence the gateway dead-man reads as "the
+operator is gone" (warn scales motion to ZERO at 300 ms WAN, stop drops the latched target at
+1 s). Every awaited move slower than t_stop died mid-flight as a phantom timeout — the same
+hardware-found failure `action(wait=True)` had (2026-08-22). `pose(wait=True)` now streams the
+empty-jog keep-alive (commands nothing, cancels nothing) until the terminal status, and gains
+the same strict-mode liveness guard as every other motion verb.
+
+`goto_pose` — the parallel-built name for the same verb — is now a thin alias with its
+awaited-move defaults (`wait=True`, 15 s patience): one implementation, one feeder, one
+capability gate, no drift. New code calls `pose()`.
+
 ### Cartesian pose targets — `RemoteTeleop.pose()` (spec: `control.pose`, PROPOSED)
 
 `pose(side, position_m, orientation_xyzw=None, wait=False)` commands an absolute gripper-TCP
