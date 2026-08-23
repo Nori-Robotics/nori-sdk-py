@@ -221,3 +221,41 @@ async def test_action_wait_feeds_the_watchdog_while_traveling(monkeypatch) -> No
             real_handle(frame)
         status = await task
         assert status is not None and status.done
+
+
+def test_control_pose_builder_shape() -> None:
+    from nori_sdk.protocol import control_pose
+
+    frame = control_pose(7, "right", [0.55, -0.45, 0.98], action_id="p1")
+    assert frame["pose"]["right_arm"] == {"frame": "base_footprint",
+                                          "position_m": [0.55, -0.45, 0.98]}
+    assert "orientation_xyzw" not in frame["pose"]["right_arm"]  # omitted = keep current
+    full = control_pose(8, "left", [0.1, 0.2, 0.3], [0.0, 0.0, 0.0, 1.0], "p2")
+    assert full["pose"]["left_arm"]["orientation_xyzw"] == [0.0, 0.0, 0.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_goto_pose_waits_for_terminal_status() -> None:
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot) as robot:
+        await robot.wait_ready()
+        status = await robot.goto_pose("right", [0.55, -0.45, 0.98])
+        assert status is not None and status.succeeded
+
+
+@pytest.mark.asyncio
+async def test_goto_pose_bad_pose_is_structured() -> None:
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot) as robot:
+        await robot.wait_ready()
+        # malformed by hand (the typed API can't produce this shape)
+        fut = asyncio.get_running_loop().create_future()
+        robot._pending_actions["px"] = fut
+        robot._send({"type": "control", "seq": 999, "action_id": "px",
+                     "pose": {"right_arm": {"frame": "wrong"}}})
+        status = await asyncio.wait_for(fut, 5.0)
+        assert status.state == "blocked" and status.reason == "bad_pose"

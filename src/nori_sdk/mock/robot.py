@@ -331,6 +331,36 @@ class MockRobot:
             if isinstance(message.get("jog"), dict):
                 self.jog = message["jog"]
             replies = []
+            pose = message.get("pose")
+            if isinstance(pose, dict) and not self.estopped:
+                # pose (capability pose_targets): the double has no IK — it
+                # accepts the shape and teleports the arm's telemetry a
+                # plausible step so scripts see motion, then runs the same
+                # action lifecycle. Geometry truth lives in the SIM stage;
+                # this stage rehearses PROTOCOL flow only.
+                action_id = message.get("action_id")
+                sides = [k[:-4] for k in pose if k.endswith("_arm")]
+                if action_id and sides:
+                    side = sides[0]
+                    target = pose.get(f"{side}_arm") or {}
+                    ok = (target.get("frame") == "base_footprint"
+                          and isinstance(target.get("position_m"), list)
+                          and len(target["position_m"]) == 3)
+                    if not ok:
+                        replies.append(self._emit({
+                            "type": "action_status", "action_id": action_id,
+                            "state": "blocked", "reason": "bad_pose",
+                            "ts_ns": time.time_ns()}))
+                    else:
+                        self._advance(f"{side}_arm_shoulder_pitch.pos", -5.0)
+                        for state in self._action_lifecycle():
+                            pose_frame: dict[str, Any] = {
+                                "type": "action_status",
+                                "action_id": action_id, "state": state,
+                                "ts_ns": time.time_ns()}
+                            if state == "blocked":
+                                pose_frame["reason"] = "no_ik:-31"
+                            replies.append(self._emit(pose_frame))
             if isinstance(message.get("action"), dict):
                 self.action.update(message["action"])
                 if not self.estopped:
