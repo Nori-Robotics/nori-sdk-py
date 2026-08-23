@@ -259,3 +259,60 @@ async def test_goto_pose_bad_pose_is_structured() -> None:
                      "pose": {"right_arm": {"frame": "wrong"}}})
         status = await asyncio.wait_for(fut, 5.0)
         assert status.state == "blocked" and status.reason == "bad_pose"
+
+
+@pytest.mark.asyncio
+async def test_pose_wait_feeds_the_watchdog_while_traveling() -> None:
+    """pose(wait=True) is the exact shape that starves the dead-man: ONE
+    control frame latching a target the arm takes seconds to reach, then an
+    await. Without the empty-jog keep-alive the watchdog hits t_stop and
+    drops the move mid-flight (the same hardware-found failure action() had,
+    2026-08-22). The keep-alive must stream until the terminal status."""
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot) as robot:
+        await robot.wait_ready()
+
+        real_handle = robot._handle_frame
+        parked: list = []
+
+        def gate_frames(frame: str) -> None:
+            if '"action_status"' in frame:
+                parked.append(frame)
+                return
+            real_handle(frame)
+
+        robot._handle_frame = gate_frames  # type: ignore[method-assign]
+        sent_before = len(bot.received)
+        task = asyncio.get_running_loop().create_task(
+            robot.pose("right", [0.55, -0.45, 0.98], wait=True, timeout=5.0)
+        )
+        await asyncio.sleep(1.2)  # > WAN t_stop
+        keepalives = [
+            f for f in bot.received[sent_before:]
+            if f.get("type") == "control" and f.get("jog") == {}
+        ]
+        assert len(keepalives) >= 10, f"only {len(keepalives)} keep-alives in 1.2s"
+        assert bot.watchdog != "stop"
+        robot._handle_frame = real_handle  # type: ignore[method-assign]
+        for frame in parked:
+            real_handle(frame)
+        status = await task
+        assert status is not None and status.done
+
+
+@pytest.mark.asyncio
+async def test_goto_pose_is_a_pose_alias() -> None:
+    """goto_pose survives as the awaited-defaults alias; both names must ride
+    the SAME implementation (one feeder, one gate, no drift)."""
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot) as robot:
+        await robot.wait_ready()
+        status = await robot.goto_pose("right", [0.55, -0.45, 0.98])
+        assert status is not None and status.done
+        pose_frames = [f for f in bot.received if f.get("type") == "control"
+                       and "pose" in f]
+        assert pose_frames, "alias sent no pose frame"
