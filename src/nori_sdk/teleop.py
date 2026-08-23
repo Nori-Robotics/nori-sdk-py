@@ -477,6 +477,21 @@ class RemoteTeleop:
         future: asyncio.Future[ActionStatus] = asyncio.get_running_loop().create_future()
         self._pending_actions[action_id] = future
         self._send(protocol.control_action(self._next_seq(), targets, action_id))
+
+        # Feed the watchdog while the arm PHYSICALLY TRAVELS. One frame then
+        # silence starves the robot's dead-man past t_stop (500 ms LAN / 1 s
+        # WAN): it drops the latched target mid-flight and answers "timeout"
+        # for any move slower than that — which is MOST real arm moves.
+        # Hardware-found 2026-08-22, first live agent0 run: the first slow
+        # untuck move died at exactly the WAN t_stop. An empty jog is the
+        # robot-pinned keep-alive that cancels nothing (same one hold() uses).
+        async def _feed() -> None:
+            interval = 1.0 / JOG_HZ
+            while True:
+                await asyncio.sleep(interval)
+                self._send(protocol.control_jog(self._next_seq(), {}))
+
+        feeder = self._spawn(_feed())
         try:
             return await asyncio.wait_for(future, timeout)
         except TimeoutError:
@@ -485,6 +500,50 @@ class RemoteTeleop:
                 f"(daemon status: {self._daemon.state if self._daemon else 'unknown'})"
             ) from None
         finally:
+            feeder.cancel()
+            self._pending_actions.pop(action_id, None)
+
+    async def goto_pose(self, side: str, position_m: list[float],
+                        orientation_xyzw: list[float] | None = None,
+                        wait: bool = True,
+                        timeout: float = 15.0) -> ActionStatus | None:
+        """Cartesian pose target (capability `pose_targets`): the robot solves
+        IK and executes through the same latched path as action(). Frame is
+        base_footprint (REP-103, meters); omitted orientation keeps the tcp's
+        current orientation. Returns the terminal ActionStatus (done | blocked
+        | timeout — blocked reasons are structured: no_ik*, bad_pose,
+        superseded, ...). Robots that predate the verb never reply: gate on
+        `"pose_targets" in info.capabilities` and treat a client-side
+        TeleopError timeout as "robot too old", not "unreachable pose".
+
+        In strict mode raises up front when disconnected / daemon offline."""
+        self._require_live("goto_pose")
+        action_id = uuid.uuid4().hex[:12]
+        if not wait:
+            self._send(protocol.control_pose(
+                self._next_seq(), side, position_m, orientation_xyzw, action_id))
+            return None
+        future: asyncio.Future[ActionStatus] = asyncio.get_running_loop().create_future()
+        self._pending_actions[action_id] = future
+        self._send(protocol.control_pose(
+            self._next_seq(), side, position_m, orientation_xyzw, action_id))
+
+        async def _feed() -> None:
+            interval = 1.0 / JOG_HZ
+            while True:
+                await asyncio.sleep(interval)
+                self._send(protocol.control_jog(self._next_seq(), {}))
+
+        feeder = self._spawn(_feed())
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            raise TeleopError(
+                f"no action_status for pose {action_id} within {timeout:.0f}s "
+                f"(daemon status: {self._daemon.state if self._daemon else 'unknown'})"
+            ) from None
+        finally:
+            feeder.cancel()
             self._pending_actions.pop(action_id, None)
 
     async def pose(

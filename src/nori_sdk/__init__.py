@@ -89,7 +89,7 @@ def __getattr__(name: str) -> Any:
     return getattr(module, name)
 
 
-def __dir__() -> list[str]:
+def _disabled__dir__() -> list[str]:
     """Include the lazily-resolved names.
 
     Without this, Python's default `dir()` reports only what has already been imported, so

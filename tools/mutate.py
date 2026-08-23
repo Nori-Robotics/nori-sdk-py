@@ -6,11 +6,40 @@ length and the edit/run/restore cycle finished inside one second, so Python's (m
 staleness check served the old code.
 """
 
+import atexit
+import os
 import pathlib
 import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# CONCURRENCY GUARD. This harness edits source files IN PLACE and restores them, so two runs
+# at once interleave their writes and restores: the loser leaves a half-written file behind and
+# the suite breaks in a way that looks like a real failure. That happened (2026-08-23, three
+# overlapping runs left two garbage lines on the end of types.py), so it is now refused rather
+# than trusted to operator discipline.
+_LOCK = ROOT / ".mutate.lock"
+
+
+def _acquire() -> None:
+    try:
+        fd = os.open(_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        sys.exit(
+            f"another mutate.py run holds {_LOCK.name}. This harness rewrites source files in "
+            "place, so concurrent runs corrupt the tree. Wait for it, or remove the lock if "
+            "you are certain no run is live."
+        )
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    # Released on ANY exit, including the sys.exit at the end and an unhandled exception --
+    # otherwise one crash makes every later run refuse to start.
+    atexit.register(lambda: _LOCK.unlink(missing_ok=True))
+
+
+_acquire()
+
 
 MUTATIONS = [
     (

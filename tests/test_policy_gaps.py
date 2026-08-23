@@ -88,10 +88,11 @@ async def test_mock_a3_integrates_central_lift_in_millimeters() -> None:
     async with mock_session(bot) as robot:
         info = await robot.wait_ready()
         assert info.descriptor is not None and "lift" in info.descriptor.aux
+        start = bot.pose["lift.pos"]  # seeded mid-travel (360), like a real robot
         await robot.jog(JogBuilder(info.descriptor).central_lift(1.0).build(), duration=0.5)
-        # ~0.5 s at full rate = ~CENTRAL_LIFT_MM_PER_S/2 mm, clamped to [0, 720]
-        pos = bot.pose.get("lift.pos", 0.0)
-        assert 0.0 < pos <= CENTRAL_LIFT_MM_PER_S  # moved, in mm scale, within range
+        # ~0.5 s at full rate = ~CENTRAL_LIFT_MM_PER_S/2 mm upward from the seed
+        moved = bot.pose["lift.pos"] - start
+        assert 0.0 < moved <= CENTRAL_LIFT_MM_PER_S  # moved up, in mm scale
 
 
 # --- snapshot_png ----------------------------------------------------------------------------
@@ -158,3 +159,103 @@ async def test_strict_allows_motion_on_a_healthy_session() -> None:
         await robot.wait_ready()
         await robot.action({"left_arm_shoulder_pan.pos": 10.0})  # no raise
         await robot.hold(100.0)
+
+
+def test_mock_pose_seeded_from_descriptor() -> None:
+    """A real gateway reports every calibrated joint from the first telemetry
+    frame; the mock must too, or a policy's readiness poll passes on the base
+    keys alone and then KeyErrors on an arm joint (hardware-found 2026-08-22)."""
+    from nori_sdk.mock import A3_DESCRIPTOR
+    from nori_sdk.mock.robot import DEFAULT_DESCRIPTOR, MockRobot
+
+    a3 = MockRobot(descriptor=A3_DESCRIPTOR)
+    for key in A3_DESCRIPTOR["joints"]:
+        assert a3.pose[key] == 0.0
+    assert a3.pose["lift.pos"] == 360.0  # mid-travel of [0, 720]
+
+    l2 = MockRobot(descriptor=DEFAULT_DESCRIPTOR)
+    for key in DEFAULT_DESCRIPTOR["joints"]:
+        assert l2.pose[key] == 0.0
+    assert "lift.pos" not in l2.pose  # no central lift advertised
+
+    bare = MockRobot(descriptor=None)  # legacy robot: nothing to seed
+    assert bare.pose == {}
+
+
+@pytest.mark.asyncio
+async def test_action_wait_feeds_the_watchdog_while_traveling(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """One action frame then silence starves the robot's dead-man during any
+    move slower than t_stop — the robot drops the target mid-flight and
+    answers timeout (hardware-found 2026-08-22, first live agent0 run).
+    action(wait=True) must stream the empty-jog keep-alive until terminal."""
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot) as robot:
+        await robot.wait_ready()
+
+        # Hold the action_status back so the wait genuinely spans time.
+        real_handle = robot._handle_frame
+        parked: list = []
+
+        def gate_frames(frame: str) -> None:
+            if '"action_status"' in frame:
+                parked.append(frame)
+                return
+            real_handle(frame)
+
+        robot._handle_frame = gate_frames  # type: ignore[method-assign]
+        sent_before = len(bot.received)
+        task = asyncio.get_running_loop().create_task(
+            robot.action({"right_arm_elbow_pitch.pos": 20.0}, wait=True, timeout=5.0)
+        )
+        await asyncio.sleep(1.2)  # > WAN t_stop
+        keepalives = [
+            f for f in bot.received[sent_before:]
+            if f.get("type") == "control" and f.get("jog") == {}
+        ]
+        assert len(keepalives) >= 10, f"only {len(keepalives)} keep-alives in 1.2s"
+        assert bot.watchdog != "stop"
+        robot._handle_frame = real_handle  # type: ignore[method-assign]
+        for frame in parked:
+            real_handle(frame)
+        status = await task
+        assert status is not None and status.done
+
+
+def test_control_pose_builder_shape() -> None:
+    from nori_sdk.protocol import control_pose
+
+    frame = control_pose(7, "right", [0.55, -0.45, 0.98], action_id="p1")
+    assert frame["pose"]["right_arm"] == {"frame": "base_footprint",
+                                          "position_m": [0.55, -0.45, 0.98]}
+    assert "orientation_xyzw" not in frame["pose"]["right_arm"]  # omitted = keep current
+    full = control_pose(8, "left", [0.1, 0.2, 0.3], [0.0, 0.0, 0.0, 1.0], "p2")
+    assert full["pose"]["left_arm"]["orientation_xyzw"] == [0.0, 0.0, 0.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_goto_pose_waits_for_terminal_status() -> None:
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot) as robot:
+        await robot.wait_ready()
+        status = await robot.goto_pose("right", [0.55, -0.45, 0.98])
+        assert status is not None and status.succeeded
+
+
+@pytest.mark.asyncio
+async def test_goto_pose_bad_pose_is_structured() -> None:
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot) as robot:
+        await robot.wait_ready()
+        # malformed by hand (the typed API can't produce this shape)
+        fut = asyncio.get_running_loop().create_future()
+        robot._pending_actions["px"] = fut
+        robot._send({"type": "control", "seq": 999, "action_id": "px",
+                     "pose": {"right_arm": {"frame": "wrong"}}})
+        status = await asyncio.wait_for(fut, 5.0)
+        assert status.state == "blocked" and status.reason == "bad_pose"

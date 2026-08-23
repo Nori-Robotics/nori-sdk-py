@@ -11,3 +11,5 @@ build/
 # Where CI checks out Nori-Protocol and where tests/_spec.py looks for it first. Ignored
 # while it is a plain checkout; delete this line if it becomes a real submodule.
 spec/
+# tools/mutate.py concurrency guard (see its header)
+.mutate.lock
