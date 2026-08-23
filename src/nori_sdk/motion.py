@@ -263,6 +263,74 @@ def normalized_for(
     return clamp(rate / full)
 
 
+# --- physical units ------------------------------------------------------------------------
+# The wire carries normalized positions, and the normalized-to-physical mapping is the ROBOT'S
+# OWN per-unit calibration -- not a nominal figure from the URDF. A robot that publishes
+# descriptor.ranges_si makes that mapping visible, which is what lets a client pose a URDF, run
+# its own FK, or feed a simulator with real angles instead of approximating.
+
+
+def to_si(descriptor: RobotDescriptor | None, joint_key: str, value: float) -> float | None:
+    """One normalized joint value -> SI (radians for revolute, metres for prismatic).
+
+        to_si(d, "left_arm_shoulder_pitch.pos", 0.0)  -> -0.02   (mid-range, radians)
+
+    None when this robot published no SI bounds for that key -- never a guess. Substituting
+    the URDF's nominal limits is the tempting move and it is wrong by whatever that unit's
+    calibration offset happens to be, silently.
+
+    No gripper special case: `ranges` already encodes the convention difference (a body joint
+    is [-100, 100], a gripper is [0, 100]), so a linear map between the two entries handles
+    both. Values outside the normalized range are CLAMPED, matching the robot, which clamps
+    rather than rejecting."""
+    if descriptor is None:
+        return None
+    norm = descriptor.ranges.get(joint_key)
+    si = descriptor.ranges_si.get(joint_key)
+    if norm is None or si is None:
+        return None
+    span = norm[1] - norm[0]
+    if span == 0:
+        return None
+    frac = clamp((value - norm[0]) / span, 0.0, 1.0)
+    return si[0] + frac * (si[1] - si[0])
+
+
+def from_si(descriptor: RobotDescriptor | None, joint_key: str, si_value: float) -> float | None:
+    """The inverse: SI -> a normalized value you can put in an `action`.
+
+    None when the robot published no SI bounds. Handles an inverted span (a calibration that
+    reverses the axis) because it divides by the signed difference rather than sorting."""
+    if descriptor is None:
+        return None
+    norm = descriptor.ranges.get(joint_key)
+    si = descriptor.ranges_si.get(joint_key)
+    if norm is None or si is None:
+        return None
+    span = si[1] - si[0]
+    if span == 0:
+        return None
+    frac = clamp((si_value - si[0]) / span, 0.0, 1.0)
+    return norm[0] + frac * (norm[1] - norm[0])
+
+
+def state_to_si(
+    descriptor: RobotDescriptor | None, state: dict[str, float]
+) -> dict[str, float]:
+    """A whole telemetry `state` dict converted to SI, keeping only what could be converted.
+
+    Keys the robot published no SI bounds for are OMITTED rather than passed through: a dict
+    silently mixing radians and normalized units is worse than a smaller one, because nothing
+    downstream can tell which is which. Compare len() against your input if you need to know
+    whether the robot described everything you asked about."""
+    out: dict[str, float] = {}
+    for key, value in state.items():
+        converted = to_si(descriptor, key, value)
+        if converted is not None:
+            out[key] = converted
+    return out
+
+
 __all__ = [
     "ARM_GROUPS",
     "BASE_GROUP",
@@ -270,10 +338,13 @@ __all__ = [
     "LIFT_GROUPS",
     "JogBuilder",
     "clamp",
+    "from_si",
     "jog_rate",
     "joint_group",
     "joint_short",
     "joints_by_group",
     "normalized_for",
     "scale_to_range",
+    "state_to_si",
+    "to_si",
 ]

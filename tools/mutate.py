@@ -181,6 +181,48 @@ MUTATIONS = [
         '    return clamp(rate / full)',
         '    return rate / full',
     ),
+    (
+        '12. ranges_si dropped from the descriptor parse',
+        'src/nori_sdk/types.py',
+        '            ranges_si=spans("ranges_si"),\n',
+        '            ranges_si={},\n',
+    ),
+    (
+        '12b. an inverted calibration span gets sorted (flips the joint)',
+        'src/nori_sdk/types.py',
+        '                        out[k] = (float(lo), float(hi))',
+        '                        out[k] = (min(float(lo), float(hi)), max(float(lo), float(hi)))',
+    ),
+    (
+        '12c. to_si guesses instead of returning None',
+        'src/nori_sdk/motion.py',
+        '    if norm is None or si is None:\n        return None\n    span = norm[1] - norm[0]',
+        '    if norm is None or si is None:\n        return value\n    span = norm[1] - norm[0]',
+    ),
+    (
+        '12d. state_to_si passes through what it could not convert',
+        'src/nori_sdk/motion.py',
+        '        if converted is not None:\n            out[key] = converted',
+        '        out[key] = converted if converted is not None else value',
+    ),
+    (
+        '13. policy_stream gated on MOTION health (refuses a valid bridge verb)',
+        'src/nori_sdk/teleop.py',
+        '        self._require_connected(f"policy_stream({action!r})")',
+        '        self._require_live(f"policy_stream({action!r})")',
+    ),
+    (
+        '13b. the action verdict map grows without bound',
+        'src/nori_sdk/teleop.py',
+        '            while len(self._action_states) > ACTION_HISTORY:',
+        '            while False and len(self._action_states) > ACTION_HISTORY:',
+    ),
+    (
+        "13c. perception age uses the ROBOT's clock (folds in skew)",
+        'src/nori_sdk/teleop.py',
+        '        return time.monotonic() - self._perception_at',
+        '        return (time.time_ns() - self._perception.ts_ns) / 1e9',
+    ),
 ]
 
 

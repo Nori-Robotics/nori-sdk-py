@@ -177,6 +177,16 @@ class RobotDescriptor:
     cameras: list[str] = field(default_factory=list)  # roles; match the CameraLayout tiles
     ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
 
+    # The same bounds as `ranges`, in SI units (radians for revolute, metres for prismatic).
+    # Empty when the robot does not publish them -- the L-series fleet never will. These are
+    # the robot's own CALIBRATED bounds, not nominal URDF limits, which is what makes a
+    # normalized->radian conversion exact rather than approximate. See motion.to_si().
+    #
+    # Only keys whose `ranges` entry is NORMALIZED appear here. The A-series lift is absent on
+    # purpose: ranges["lift.pos"] is already millimetres, so an entry would mean converting a
+    # value that is already physical.
+    ranges_si: dict[str, tuple[float, float]] = field(default_factory=dict)
+
     # How a normalized jog rate converts to real motion on THIS robot. None means the robot
     # did not advertise it — the L2 fleet is frozen and never will, so None is the common
     # case. See motion.jog_rate()/normalized_for(). NOT achieved velocity: the watchdog's
@@ -193,14 +203,21 @@ class RobotDescriptor:
             v = obj.get(key)
             return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
 
-        ranges: dict[str, tuple[float, float]] = {}
-        raw_ranges = obj.get("ranges")
-        if isinstance(raw_ranges, dict):
-            for k, pair in raw_ranges.items():
+        def spans(key: str) -> dict[str, tuple[float, float]]:
+            out: dict[str, tuple[float, float]] = {}
+            raw = obj.get(key)
+            if not isinstance(raw, dict):
+                return out
+            for k, pair in raw.items():
                 if isinstance(pair, (list, tuple)) and len(pair) == 2:
                     lo, hi = pair
                     if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-                        ranges[k] = (float(lo), float(hi))
+                        # NOT sorted: an inverted span means the calibration reverses that
+                        # axis, and normalizing the order away would flip the joint.
+                        out[k] = (float(lo), float(hi))
+            return out
+
+        ranges = spans("ranges")
         return cls(
             buses=strs("buses"),
             joints=strs("joints"),
@@ -208,6 +225,7 @@ class RobotDescriptor:
             aux=strs("aux"),
             cameras=strs("cameras"),
             ranges=ranges,
+            ranges_si=spans("ranges_si"),
             jog_scale=JogScale.from_wire(obj.get("jog_scale")),
         )
 

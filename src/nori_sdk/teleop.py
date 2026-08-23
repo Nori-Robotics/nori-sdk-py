@@ -40,6 +40,7 @@ import importlib.util
 import logging
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterable
 from typing import Any, Self
 
@@ -58,6 +59,8 @@ from .types import (
     CameraLayout,
     ConnectStatus,
     DaemonStatus,
+    Perception,
+    PolicyStreamStatus,
     RecordState,
     RobotInfo,
     Telemetry,
@@ -69,6 +72,10 @@ log = logging.getLogger("nori_sdk.teleop")
 # How often a held jog is re-sent. The robot's watchdog warns at 150 ms (LAN) / 300 ms (WAN),
 # so 20 Hz leaves ~3 frames of headroom on the tighter profile.
 JOG_HZ = 20.0
+
+# How many per-action verdicts to remember for action_status(). Bounds memory on a long
+# unattended run; nothing needs more than the most recent handful.
+ACTION_HISTORY = 256
 # How long we wait for the robot to announce itself before calling it absent. The robot
 # announces on join and we re-ask every RETRY_S, so this is several missed chances.
 ROBOT_WAIT_S = 20.0
@@ -114,6 +121,14 @@ class RemoteTeleop:
         self._daemon: DaemonStatus | None = None
         self._layout: CameraLayout | None = None
         self._link_mode: str = ""
+        self._perception: Perception | None = None
+        self._perception_at: float = 0.0        # monotonic; staleness is the useful reading
+        self._policy: PolicyStreamStatus | None = None
+        self._record_state: RecordState | None = None
+        # Last status per action_id, so a fire-and-forget caller can poll instead of awaiting.
+        # BOUNDED: a policy issuing thousands of actions must not grow this without limit, and
+        # nothing needs the history -- only the most recent verdict per id.
+        self._action_states: OrderedDict[str, ActionStatus] = OrderedDict()
 
         # --- plumbing ---
         self._pc: Any = None  # RTCPeerConnection; typed Any so the core stays import-free
@@ -130,6 +145,7 @@ class RemoteTeleop:
         self._listeners: dict[str, list[Callable[[Any], Any]]] = {}
         self._pending_actions: dict[str, asyncio.Future[ActionStatus]] = {}
         self._record_waiters: list[asyncio.Future[RecordState]] = []
+        self._policy_waiters: list[asyncio.Future[PolicyStreamStatus]] = []
         self._tasks: set[asyncio.Task[Any]] = set()
         self._jog_payload: dict[str, Any] | None = None
         self._jog_task: asyncio.Task[Any] | None = None
@@ -264,6 +280,56 @@ class RemoteTeleop:
         layout is rejected rather than adopted, so this never goes from good to blank."""
         return self._layout
 
+    def perceive(self) -> Perception | None:
+        """The robot's latest world-state from its vision stack, or None if none has arrived.
+
+        None is the common case and does NOT mean "nothing is in front of the robot": the
+        detector may simply not be running. Use perception_age to tell a fresh read from a
+        stale one — a policy that acts on a 30-second-old detection is acting on fiction."""
+        return self._perception
+
+    @property
+    def perception_age(self) -> float | None:
+        """Seconds since the last `perception` frame, or None if none has arrived.
+
+        Measured on the monotonic clock, not the frame's ts_ns: that timestamp is the ROBOT's
+        clock, so differencing it against ours would fold in clock skew."""
+        if self._perception is None:
+            return None
+        return time.monotonic() - self._perception_at
+
+    @property
+    def policy_stream_status(self) -> PolicyStreamStatus | None:
+        """The last `policy_stream_status` seen, or None if none has arrived.
+
+        POLLING IS THE ONLY WAY to notice a dead stream. There is no unsolicited death
+        notification — the robot's streamer can only answer a request, and its end-of-run
+        result is discarded rather than pushed. A stream that dies mid-run (sink timeout,
+        camera silence) is visible only by calling policy_stream("status")."""
+        return self._policy
+
+    @property
+    def record_state(self) -> RecordState | None:
+        """The last `record_status` seen, or None if no record verb has been issued yet.
+
+        Every reply carries the WHOLE recording state rather than a delta, so this is a
+        complete snapshot and a client that missed one frame is not left inconsistent."""
+        return self._record_state
+
+    def action_status(self, action_id: str) -> ActionStatus | None:
+        """The latest verdict for one action_id, or None if none has arrived yet.
+
+        For the fire-and-forget-then-poll shape: `action(..., wait=False)` with your own id,
+        then poll. `action(wait=True)` is simpler when you can block. Only the most recent
+        ACTION_HISTORY ids are retained, so poll while the action is live rather than
+        auditing an old run from this."""
+        return self._action_states.get(action_id)
+
+    @staticmethod
+    def next_action_id() -> str:
+        """A fresh action_id for correlating a fire-and-forget `action` with its status."""
+        return uuid.uuid4().hex[:12]
+
     @property
     def is_connected(self) -> bool:
         """The peer connection is up. NOT the same as "the robot will move": motion can be
@@ -326,6 +392,19 @@ class RemoteTeleop:
                 f"{verb}: robot motion stack is offline (strict mode): "
                 f"{getattr(daemon, 'detail', '') or 'daemon_status.online=false'}"
             )
+
+    def _require_connected(self, verb: str) -> None:
+        """strict-mode gate for the BRIDGE-side verbs: policy_stream, record, video, call.
+
+        Connection only — deliberately NOT daemon_status. Those verbs are served by the
+        bridge in front of the motion daemon, so they work perfectly well while motion is
+        offline: you can poll a running policy stream on a robot whose arms are disabled.
+        Gating them on motion health would make strict mode refuse valid operations, which is
+        worse than not having the gate."""
+        if not self._strict:
+            return
+        if self._stopped or not self.is_connected:
+            raise TeleopError(f"{verb}: session is not connected (strict mode)")
 
     def set_jog(self, payload: dict[str, Any] | None) -> None:
         """Set the continuously streamed jog — the keyboard-held model.
@@ -427,11 +506,16 @@ class RemoteTeleop:
         (supports() is None) is allowed through: probe-and-see is the legacy contract.
 
         Failure is a modelled reply on the awaited status, not an exception: `blocked`
-        with reason "no_ik_solution" (never retriable at this lift height), "ik_timeout"
-        (worth retrying), "limit:<joint>", "singularity", "collision", "lift_moved" (the
-        lift moved — re-send to re-solve at the new height), or "frame:<name>". The
-        intermediate "active" frame means solved-and-tracking; `.done` stays False until
-        a terminal state, and `.succeeded` is the "reached it" check."""
+        with reason "no_ik_solution" (for a FULL pose, not retriable at this lift
+        height; position-only failures are wrist-dependent — retry with an explicit
+        orientation), "ik_timeout" (worth retrying), "limit:<joint>", "singularity",
+        "collision", "lift_moved" (the lift moved — re-send to re-solve at the new
+        height), "frame:<name>", "config_jump" (a numerical-IK configuration flip;
+        split the move into waypoints), "superseded" (a newer pose or an operator jog
+        took the arm), or `timeout` with "ik_no_reply" (solver never answered; retry).
+        `reason` is an OPEN string — render unknown values verbatim, never fail on one.
+        The intermediate "active" frame means solved-and-tracking; `.done` stays False
+        until a terminal state, and `.succeeded` is the "reached it" check."""
         info = self._info
         if info is not None and info.supports("pose_targets") is False:
             raise TeleopError(
@@ -509,6 +593,72 @@ class RemoteTeleop:
         if not state.ok:
             raise TeleopError(f"record {action!r} refused: {state.error or 'no reason given'}")
         return state
+
+    # --- outbound: policy stream / leader / call --------------------------------------------
+
+    async def policy_stream(
+        self, action: str, timeout: float = 10.0, **extra: Any
+    ) -> PolicyStreamStatus:
+        """Drive the robot's policy streamer and await its reply.
+
+            await robot.policy_stream("start", dest="laptop")
+            status = await robot.policy_stream("status")     # the ONLY way to check liveness
+
+        Replies carry no correlation id, so this resolves the NEXT status frame — do not issue
+        policy_stream verbs concurrently from two tasks.
+
+        There is NO unsolicited death notification: the streamer can only answer a request and
+        its end-of-run result is discarded rather than pushed. A stream that dies mid-run (sink
+        timeout, camera silence) is observable only by polling "status". Do not build a loop
+        that waits for a failure frame — it never arrives.
+
+        Unlike record(), an `ok: false` reply is RETURNED rather than raised: for this verb a
+        refusal is ordinary state a caller inspects (a stream that is not running answers
+        ok:false to "status" routinely), not an error."""
+        self._require_connected(f"policy_stream({action!r})")
+        future: asyncio.Future[PolicyStreamStatus] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._policy_waiters.append(future)
+        self._send(protocol.policy_stream(action, **extra))
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            with contextlib.suppress(ValueError):
+                self._policy_waiters.remove(future)
+            raise TeleopError(
+                f"no policy_stream_status for {action!r} within {timeout:.0f}s"
+            ) from None
+
+    def set_leader_action(self, targets: dict[str, float]) -> None:
+        """Absolute pose from a physical leader arm — ONE frame, not a stream.
+
+        Keys are flat "<side>_arm_<joint>.pos"; body joints are DEGREES around the calibrated
+        leader zero, grippers normalized [0, 100]. The robot calibration-normalizes, runs IK
+        and applies its own slew clamp.
+
+        Gated on the `leader_action_deg` capability: a robot that does not advertise it drops
+        these frames silently, and the 5-DOF L-series key set does not map onto a 7-DOF arm at
+        all. Check `info.supports("leader_action_deg")` first.
+
+        Like a jog this is level-triggered — the robot acts on the latest frame and the
+        watchdog still applies, so send it at your control rate, not once."""
+        self._require_live("set_leader_action")
+        self._send(protocol.control_leader(self._next_seq(), targets))
+
+    def set_video_quality(self, quality: str) -> None:
+        """Named encoder preset ("low" | "normal"). Coarser than set_video_bitrate and
+        intercepted by the robot's bridge before it reaches the motion daemon."""
+        self._send(protocol.video_quality(quality))
+
+    def call(self, *, state: str | None = None, mic_muted: bool | None = None) -> None:
+        """Two-way audio control: join/leave the call, and mute/unmute our microphone.
+
+        This SDK sends the verb and nothing more. Unlike the browser client there is no local
+        audio device handling here — no capture, no playback, no echo cancellation — so on its
+        own this changes the robot's view of the call without giving you an audio path. Wire
+        your own aiortc audio track if you need one."""
+        self._send(protocol.call(state=state, mic_muted=mic_muted))
 
     # --- video frames ----------------------------------------------------------------------
 
@@ -864,14 +1014,33 @@ class RemoteTeleop:
             # completing the future on the first of them is what made action(wait=True) return
             # before the robot had moved -- reporting success while the watchdog was still
             # free to abort the move. Non-terminal frames still reach subscribers via _emit.
+            # Remembered so a fire-and-forget caller can poll action_status(id) instead of
+            # awaiting. Bounded LRU: a policy issuing thousands of actions must not grow this
+            # forever, and only the latest verdict per id is ever useful.
+            self._action_states[parsed.action_id] = parsed
+            self._action_states.move_to_end(parsed.action_id)
+            while len(self._action_states) > ACTION_HISTORY:
+                self._action_states.popitem(last=False)
             action_future = self._pending_actions.get(parsed.action_id)
             if action_future is not None and parsed.done and not action_future.done():
                 action_future.set_result(parsed)
         elif kind == "record_status" and isinstance(parsed, RecordState):
+            self._record_state = parsed
             if self._record_waiters:
                 record_future = self._record_waiters.pop(0)
                 if not record_future.done():
                     record_future.set_result(parsed)
+        elif kind == "perception" and isinstance(parsed, Perception):
+            # Monotonic, not the frame's ts_ns: that is the ROBOT's clock, so differencing it
+            # against ours would fold in clock skew and report nonsense staleness.
+            self._perception = parsed
+            self._perception_at = time.monotonic()
+        elif kind == "policy_stream_status" and isinstance(parsed, PolicyStreamStatus):
+            self._policy = parsed
+            if self._policy_waiters:
+                policy_future = self._policy_waiters.pop(0)
+                if not policy_future.done():
+                    policy_future.set_result(parsed)
         self._emit(kind, parsed if parsed is not None else obj)
 
     # --- internals -------------------------------------------------------------------------
@@ -943,4 +1112,11 @@ def _merge_telemetry(previous: Telemetry | None, incoming: Telemetry) -> Telemet
 # caller legitimately needs to reason about them -- JOG_HZ to size its own control loop,
 # ROBOT_WAIT_S to set a sensible wait_ready() timeout. Reachable-but-undeclared is the
 # worst of both: people depend on it anyway, and nothing stops it changing.
-__all__ = ["JOG_HZ", "RETRY_S", "ROBOT_WAIT_S", "RemoteTeleop", "TeleopError"]
+__all__ = [
+    "ACTION_HISTORY",
+    "JOG_HZ",
+    "RETRY_S",
+    "ROBOT_WAIT_S",
+    "RemoteTeleop",
+    "TeleopError",
+]

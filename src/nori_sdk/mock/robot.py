@@ -135,6 +135,9 @@ class MockRobot:
         self.jog: dict[str, Any] = {}
         self.action: dict[str, float] = {}
         self.pose: dict[str, float] = {}  # integrated by step(); what telemetry() reports
+        self.streaming = False            # policy streamer state
+        self.stream_dest: str | None = None
+        self._frames_sent = 0
         self.watchdog = "ok"  # "ok" | "warn" | "stop", driven by control-frame silence
         self._elapsed = 0.0  # seconds accumulated via step(); the double's whole clock
         self._last_control_at = 0.0
@@ -264,6 +267,14 @@ class MockRobot:
             "type": "ack",
             "accepted": self.accepted,
             "protocol_version": self.protocol_version,
+            # Advisory label so logs name the double honestly (never branch on it).
+            "model": "MOCK",
+            # The TRUTHFUL set of optional verbs this double honours (spec ack.json).
+            # Deliberately NOT "pose_targets": this mock refuses to invent kinematics
+            # (see step()'s docstring), so a pose frame would be silently dropped —
+            # and RemoteTeleop.pose() raising against this ack is the correct
+            # teaching, not a gap. Lets client code rehearse capability gating.
+            "capabilities": ["task_jog", "record"],
         }
         if self.descriptor is not None:
             ack["norm_mode"] = "range_m100_100"
@@ -357,7 +368,9 @@ class MockRobot:
             return []
         if kind == "record":
             return [self._emit(self._record(message))]
-        return []  # video/call/policy_stream are bridge-intercepted or out of scope
+        if kind == "policy_stream":
+            return [self._emit(self._policy_stream(message))]
+        return []  # video/call are bridge-intercepted; no audio device in a double
 
     def _action_lifecycle(self) -> list[str]:
         """The action_status states this robot would emit, in order.
@@ -367,6 +380,49 @@ class MockRobot:
         if self.estopped:
             return ["blocked"]
         return ["accepted", "active", self.action_outcome]
+
+    def _policy_stream(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Answer a policy_stream verb.
+
+        Modelled as REQUEST/REPLY only, deliberately: the real streamer is a ZMQ REP socket
+        that cannot push, so it never announces its own death. A double that helpfully emitted
+        a failure frame would teach a client to wait for something no robot sends."""
+        action = message.get("action")
+        if action == "start":
+            self.streaming = True
+            self.stream_dest = message.get("dest")
+            self._frames_sent = 0
+        elif action == "stop":
+            self.streaming = False
+        elif action != "status":
+            # Unknown verb: ok:false is ordinary state for this reply, not an error.
+            return {"type": "policy_stream_status", "ok": False,
+                    "error": f"unknown action {action!r}"}
+        if self.streaming:
+            self._frames_sent += 30
+        return {
+            "type": "policy_stream_status",
+            "ok": True,
+            "streaming": self.streaming,
+            "dest": self.stream_dest,
+            "fps_out": 14.8 if self.streaming else 0.0,
+            "frames_sent": self._frames_sent,
+            "dropped": 0,
+        }
+
+    def die_mid_stream(self) -> None:
+        """Rehearse the failure mode that has no notification: the stream stops and the robot
+        says NOTHING. The only way a client finds out is by polling "status"."""
+        self.streaming = False
+
+    def perception(self, objects: list[dict[str, Any]] | None = None) -> str:
+        """One `perception` frame. Not emitted on a timer -- a robot with no detector running
+        sends none at all, which is the common case a client must handle."""
+        return self._emit({
+            "type": "perception",
+            "ts_ns": time.time_ns(),
+            "objects": list(objects or []),
+        })
 
     def _record(self, message: dict[str, Any]) -> dict[str, Any]:
         action = message.get("action")

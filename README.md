@@ -112,7 +112,7 @@ suite uses and `mock_session()` exists to replace.
 |---|---|
 | **Lifecycle** | `start()` · `stop()` · `async with` · `wait_connected()` · `wait_ready() -> RobotInfo` |
 | **State** (properties) | `status` · `info` · `telemetry` · `daemon_status` · `camera_layout` · `is_connected` |
-| **Motion** | `jog(payload, duration=)` · `set_jog(payload)` · `stop_jog()` · `action(targets, wait=)` |
+| **Motion** | `jog(payload, duration=)` · `set_jog(payload)` · `stop_jog()` · `action(targets, wait=)` · `pose(side, position_m, orientation_xyzw=, wait=)` |
 | **Safety** | `estop()` · `reset_latch()` · `reset_arm(arm)` |
 | **Recording** | `record(verb, task=)` |
 | **Video** | `set_video_bitrate(kbps)` · `set_video_paused(bool)` · `frames()` · `snapshot(role=)` |
@@ -129,6 +129,40 @@ getting right, because the robot stops when frames stop:
 
 `frames()` and `snapshot()` return `Any` because their type comes from `av`, an optional
 dependency — they yield `av.VideoFrame` when the `webrtc` extra is installed.
+
+#### Cartesian pose targets — `pose()`
+
+`pose(side, position_m, orientation_xyzw=None, wait=False)` commands an absolute
+gripper-TCP pose and the **robot solves the IK on-board** — the wire never carries joint
+solutions, so every client shares one IK implementation instead of each shipping its own
+(the architecture the rpi4 era moved away from). Metres in `base_footprint` (fixed to the
+robot, stable across lift travel), REP-103 axes, optional ROS-order quaternion — omit it
+for "get the gripper to this point, any wrist angle" (v1 solves at the current wrist, so a
+position-only failure is worth retrying with an explicit orientation).
+
+```python
+if robot.info.supports("pose_targets"):
+    status = await robot.pose("right", [0.42, -0.18, 0.95], wait=True)
+    print(status.state, status.reason)   # e.g. "done" "" — or "blocked" "no_ik_solution"
+```
+
+Three things distinguish it from `action()`:
+
+- **Capability-gated.** Gate on `info.supports("pose_targets")` — a robot without it
+  ignores the frame silently, so `pose()` raises on an *explicit* absence rather than
+  letting a script hang to its timeout. A legacy ack (no capabilities field) passes
+  through, per the probe-or-assume-legacy contract.
+- **Failure is a modelled reply, not an exception.** The awaited status ends `blocked`
+  with a reason that tells you what to do next: `no_ik_solution` (full pose: don't retry
+  at this lift height), `ik_timeout` / `ik_no_reply` (retry), `config_jump` (waypoint the
+  move), `lift_moved` (re-send to re-solve), `limit:<joint>`, `singularity`, `collision`,
+  `frame:<name>`. The set is open — render unknown reasons, never fail on one.
+- **Terminal states are driven by observed motion**, never by the solver returning: the
+  intermediate `active` means solved-and-tracking, and a pose that stops progressing ends
+  `blocked` with the live Servo status named — there is no accepted-then-nothing state.
+
+One arm per call (arms fail independently); the gripper stays on `action()`; the lift
+never moves implicitly — a pose out of reach at the current lift height is a refusal.
 
 ### Wire types — `nori_sdk.types`
 
@@ -272,6 +306,10 @@ Verified against the spec:
   while two builders had no test at all, and one of them was producing an invalid frame.
 - Every golden fixture from both spec layers decodes, including the legacy no-descriptor ack
   and the L2-shaped frames (bridge-injected telemetry fields, `<session>/episode-NNNN`)
+- `pose()` / `control_pose()` validate against the spec's `control.pose` fixtures; the
+  robot side (A3 gateway) is bench-verified through the full lifecycle including the
+  observed-motion failure guards — but this SDK's pose path has NOT yet run end-to-end
+  over a live WebRTC session (see `nori_ws` docs/runbooks/pose-targets-sdk-hardware-test.md)
 - Descriptor-driven motion helpers
 - `MockRobot` — pinned against the real gateway's frame order and record lifecycle
 - `LoopbackSignaling` — in-process transport pair for handshake tests

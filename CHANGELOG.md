@@ -20,6 +20,59 @@ instead of a silent 10 s no-op (the payload would be ignored on the wire); a leg
 no capabilities field is allowed through, per the probe-or-assume-legacy contract. New
 builder `protocol.control_pose()` + `protocol.POSE_FRAME`; additive, no version bump.
 
+## Unreleased — 2026-08-23
+
+### The unwired verbs are wired
+
+Four frame builders passed conformance for weeks with **zero session call sites**, and two
+decoded frame types were parsed and then discarded. A builder with no call site is not a
+feature — it is a promise the API does not keep, and conformance cannot tell the difference.
+
+- **`policy_stream(action, **extra)`** — the headline Python use case could not start a
+  stream. Returns the status rather than raising on `ok: false`: unlike `record()`, a refusal
+  here is ordinary state (a stopped stream answers `ok:false` to `"status"` routinely), so
+  raising would make normal polling throw.
+- **`policy_stream_status`** — the cached last reply, with the liveness rule documented: there
+  is NO unsolicited death notification, so a stream that dies mid-run is visible only by
+  polling. `MockRobot.die_mid_stream()` rehearses exactly that.
+- **`perceive()` + `perception_age`** — perception decoded to a dataclass nothing surfaced.
+  Age is measured on OUR monotonic clock, not the frame's `ts_ns`, which is the robot's clock
+  and would fold in skew.
+- **`action_status(id)` / `next_action_id()`** — the fire-and-forget-then-poll shape. The
+  verdict map is a bounded LRU (`ACTION_HISTORY = 256`): a policy issuing thousands of actions
+  must not grow it forever, and only the latest verdict per id is useful.
+- **`record_state`**, **`set_leader_action()`**, **`set_video_quality()`**, **`call()`**.
+- **A design error caught by its own test.** I first gated `policy_stream` on
+  `_require_live`, which checks `daemon_status.online` — i.e. MOTION health. The streamer is
+  served by the bridge in FRONT of the motion daemon and runs fine on a robot whose arms are
+  disabled, so strict mode would have refused a valid operation. Split out
+  `_require_connected` for the bridge-side verbs; motion verbs still get the full gate.
+- The mock now answers `policy_stream` and can emit `perception`. A verb the double cannot
+  answer is a verb nobody can develop against.
+
+### Real angles from a normalized wire — `descriptor.ranges_si`
+
+`ranges` is in `norm_mode` units, and the normalized-to-physical mapping is the robot's own
+**per-unit calibration** — not a nominal figure from the URDF. So a client wanting real angles
+(to pose a URDF, run FK, feed a simulator) had to substitute the URDF's nominal joint limits,
+wrong by that unit's calibration offset and wrong **silently**.
+
+- **Protocol**: `descriptor.ranges_si`, optional and additive — radians for revolute, metres
+  for prismatic. Two fixtures (a full A3 with per-side calibration skew, and an inverted span).
+  50 fixtures / 18 schemas / 0 failures.
+- **No gripper special case.** `ranges` already encodes the convention difference (body joint
+  `[-100,100]`, gripper `[0,100]`), so one linear map between the two entries covers both. A
+  hand-written gripper branch is the thing that rots when a robot changes convention.
+- **Only normalized keys appear.** The A-series lift is deliberately absent: `ranges["lift.pos"]`
+  is already millimetres, so an SI entry would mean converting twice.
+- **Inverted bounds are honoured, not sorted.** A calibration can reverse an axis and the
+  ORDER carries that; sorting it ascending would flip the joint.
+- **SDK**: `motion.to_si()`, `from_si()`, `state_to_si()`. All return `None`/omit rather than
+  guessing — the frozen L-series never publishes this, so absence is the common case.
+  `state_to_si()` OMITS what it cannot convert rather than passing it through: a dict silently
+  mixing radians and normalized units is worse than a smaller one, because nothing downstream
+  can tell which key is in which unit.
+
 ## Unreleased — 2026-08-20
 
 ### Calibrated jog rates — `descriptor.jog_scale`

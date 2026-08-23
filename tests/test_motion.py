@@ -6,11 +6,14 @@ import pytest
 from nori_sdk.mock.robot import DEFAULT_DESCRIPTOR
 from nori_sdk.motion import (
     JogBuilder,
+    from_si,
     jog_rate,
     joint_short,
     joints_by_group,
     normalized_for,
     scale_to_range,
+    state_to_si,
+    to_si,
 )
 from nori_sdk.types import RobotDescriptor
 
@@ -167,3 +170,88 @@ def test_a_nonpositive_published_rate_is_dropped_rather_than_believed():
 def test_a_robot_with_no_jog_scale_parses_to_None_not_an_empty_scale():
     """None and an empty JogScale are different claims: "did not say" vs "said, named nothing"."""
     assert DESCRIPTOR.jog_scale is None
+
+
+# --- physical units: descriptor.ranges_si ------------------------------------------------
+
+SI = RobotDescriptor.from_wire({
+    "joints": ["left_arm_shoulder_pitch.pos", "left_arm_gripper.pos", "lift.pos"],
+    "aux": ["lift"],
+    "ranges": {
+        "left_arm_shoulder_pitch.pos": [-100.0, 100.0],   # body: symmetric convention
+        "left_arm_gripper.pos": [0.0, 100.0],             # gripper: 0..100 convention
+        "lift.pos": [0.0, 720.0],                         # ALREADY physical (mm)
+    },
+    "ranges_si": {
+        "left_arm_shoulder_pitch.pos": [-1.92, 1.88],
+        "left_arm_gripper.pos": [0.0, 0.043],
+        # no lift entry: converting a value already in mm would convert twice
+    },
+})
+
+
+def test_to_si_maps_a_body_joint_onto_its_calibrated_radians():
+    assert to_si(SI, "left_arm_shoulder_pitch.pos", -100.0) == pytest.approx(-1.92)
+    assert to_si(SI, "left_arm_shoulder_pitch.pos", 100.0) == pytest.approx(1.88)
+    # Mid-normalized is mid-CALIBRATED, which is not zero on an asymmetric joint -- exactly
+    # the offset that using nominal URDF limits would have silently discarded.
+    assert to_si(SI, "left_arm_shoulder_pitch.pos", 0.0) == pytest.approx(-0.02)
+
+
+def test_the_gripper_needs_no_special_case():
+    """`ranges` already encodes the convention difference, so one linear map handles both. A
+    hand-written gripper branch is the thing that rots when a robot changes convention."""
+    assert to_si(SI, "left_arm_gripper.pos", 0.0) == pytest.approx(0.0)
+    assert to_si(SI, "left_arm_gripper.pos", 100.0) == pytest.approx(0.043)
+    assert to_si(SI, "left_arm_gripper.pos", 50.0) == pytest.approx(0.0215)
+
+
+def test_a_key_with_no_si_bounds_is_None_never_a_guess():
+    # The lift: `ranges` is already mm, so there is no SI entry and nothing to convert.
+    assert to_si(SI, "lift.pos", 360.0) is None
+    # And a robot that publishes no SI bounds at all -- the frozen L-series.
+    assert to_si(DESCRIPTOR, "left_arm_shoulder_pan.pos", 0.0) is None
+    assert to_si(None, "left_arm_shoulder_pitch.pos", 0.0) is None
+
+
+def test_out_of_range_input_clamps_like_the_robot_does():
+    assert to_si(SI, "left_arm_shoulder_pitch.pos", 999.0) == pytest.approx(1.88)
+    assert to_si(SI, "left_arm_shoulder_pitch.pos", -999.0) == pytest.approx(-1.92)
+
+
+def test_from_si_round_trips():
+    for norm in (-100.0, -37.5, 0.0, 61.25, 100.0):
+        rad = to_si(SI, "left_arm_shoulder_pitch.pos", norm)
+        assert rad is not None
+        assert from_si(SI, "left_arm_shoulder_pitch.pos", rad) == pytest.approx(norm)
+
+
+def test_an_inverted_calibration_span_is_honoured_not_sorted():
+    """A calibration can reverse an axis, and the ORDER of the span carries that. Sorting it
+    into ascending order would flip the joint -- the arm would move the wrong way."""
+    flipped = RobotDescriptor.from_wire({
+        "joints": ["left_arm_wrist_roll.pos"],
+        "ranges": {"left_arm_wrist_roll.pos": [-100.0, 100.0]},
+        "ranges_si": {"left_arm_wrist_roll.pos": [2.79, -2.81]},
+    })
+    assert flipped.ranges_si["left_arm_wrist_roll.pos"] == (2.79, -2.81)
+    assert to_si(flipped, "left_arm_wrist_roll.pos", -100.0) == pytest.approx(2.79)
+    assert to_si(flipped, "left_arm_wrist_roll.pos", 100.0) == pytest.approx(-2.81)
+    # and the inverse still round-trips through the reversed span
+    assert from_si(flipped, "left_arm_wrist_roll.pos", 2.79) == pytest.approx(-100.0)
+
+
+def test_state_to_si_omits_what_it_cannot_convert():
+    """A dict silently mixing radians and normalized units is worse than a smaller one:
+    nothing downstream can tell which key is in which unit."""
+    out = state_to_si(SI, {
+        "left_arm_shoulder_pitch.pos": 0.0,
+        "lift.pos": 360.0,        # no SI bounds -> omitted, not passed through
+        "x.vel": 0.4,             # not a joint at all
+    })
+    assert set(out) == {"left_arm_shoulder_pitch.pos"}
+    assert out["left_arm_shoulder_pitch.pos"] == pytest.approx(-0.02)
+
+
+def test_a_robot_without_si_bounds_yields_an_empty_conversion():
+    assert state_to_si(DESCRIPTOR, {"left_arm_shoulder_pan.pos": 10.0}) == {}
