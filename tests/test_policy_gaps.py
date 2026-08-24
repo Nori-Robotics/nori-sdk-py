@@ -238,7 +238,7 @@ def test_control_pose_builder_shape() -> None:
 async def test_goto_pose_waits_for_terminal_status() -> None:
     from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
 
-    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    bot = MockRobot(descriptor=A3_DESCRIPTOR, capabilities=["task_jog", "record", "pose_targets"])
     async with mock_session(bot) as robot:
         await robot.wait_ready()
         status = await robot.goto_pose("right", [0.55, -0.45, 0.98])
@@ -249,7 +249,11 @@ async def test_goto_pose_waits_for_terminal_status() -> None:
 async def test_goto_pose_bad_pose_is_structured() -> None:
     from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
 
-    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    # Pose-capable: this asserts the robot REJECTS a malformed pose, which only means
+    # something on a robot that serves the verb at all. Against a double that does not
+    # advertise it the frame is dropped in silence and there is no reply to inspect.
+    bot = MockRobot(descriptor=A3_DESCRIPTOR,
+                    capabilities=["task_jog", "record", "pose_targets"])
     async with mock_session(bot) as robot:
         await robot.wait_ready()
         # malformed by hand (the typed API can't produce this shape)
@@ -270,7 +274,7 @@ async def test_pose_wait_feeds_the_watchdog_while_traveling() -> None:
     2026-08-22). The keep-alive must stream until the terminal status."""
     from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
 
-    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    bot = MockRobot(descriptor=A3_DESCRIPTOR, capabilities=["task_jog", "record", "pose_targets"])
     async with mock_session(bot) as robot:
         await robot.wait_ready()
 
@@ -308,7 +312,7 @@ async def test_goto_pose_is_a_pose_alias() -> None:
     the SAME implementation (one feeder, one gate, no drift)."""
     from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
 
-    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    bot = MockRobot(descriptor=A3_DESCRIPTOR, capabilities=["task_jog", "record", "pose_targets"])
     async with mock_session(bot) as robot:
         await robot.wait_ready()
         status = await robot.goto_pose("right", [0.55, -0.45, 0.98])
@@ -316,3 +320,43 @@ async def test_goto_pose_is_a_pose_alias() -> None:
         pose_frames = [f for f in bot.received if f.get("type") == "control"
                        and "pose" in f]
         assert pose_frames, "alias sent no pose frame"
+
+
+async def test_an_unadvertised_pose_verb_is_dropped_in_silence() -> None:
+    """The other half of the capability contract, and the reason the mock enforces its own
+    advertisement: a double that serves a verb it did not advertise is MORE capable than it
+    claims, so a client that ignored the gate would pass here and fail on hardware.
+
+    Two commits disagreed about this — the ack said pose was deliberately unadvertised and
+    would be dropped, while handle() served it anyway. The tests were written against the
+    second and main went red. Now the advertisement gates the behaviour, so they cannot
+    diverge again."""
+    import asyncio
+
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)  # default: no pose_targets
+    async with mock_session(bot) as robot:
+        info = await robot.wait_ready()
+        assert info.supports("pose_targets") is False
+
+        fut = asyncio.get_running_loop().create_future()
+        robot._pending_actions["px"] = fut
+        robot._send({"type": "control", "seq": 1, "action_id": "px",
+                     "pose": {"right_arm": {"frame": "base_footprint",
+                                            "position_m": [0.4, 0.0, 0.9]}}})
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(fut, 0.15)
+        assert bot.dropped_pose_frames == 1
+
+
+async def test_the_typed_api_refuses_before_the_frame_flies() -> None:
+    """And the client-side gate means a caller never has to discover the silence: pose()
+    raises against a robot that explicitly does not advertise the verb."""
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+    from nori_sdk.teleop import TeleopError
+
+    async with mock_session(MockRobot(descriptor=A3_DESCRIPTOR)) as robot:
+        await robot.wait_ready()
+        with pytest.raises(TeleopError, match="pose_targets"):
+            await robot.pose("right", [0.4, 0.0, 0.9])

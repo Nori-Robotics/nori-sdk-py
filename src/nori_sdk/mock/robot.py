@@ -109,6 +109,7 @@ class MockRobot:
         protocol_version: int = NORI_PROTOCOL_VERSION,
         on_send: Callable[[str], None] | None = None,
         action_outcome: str = "done",
+        capabilities: list[str] | None = None,
         tiles: list[str] | None = None,
     ) -> None:
         self.descriptor = descriptor
@@ -128,6 +129,15 @@ class MockRobot:
         # How an accepted action ENDS: "done", "clamped" or "timeout". Set it to rehearse the
         # outcomes a script has to handle but a bench robot rarely produces on demand.
         self.action_outcome = action_outcome
+        # The optional verbs this double HONOURS -- and it honours exactly these, no more:
+        # handle() checks this list before acting, so the double can never quietly serve a
+        # verb it did not advertise. Default omits "pose_targets" so the out-of-the-box mock
+        # is the common fleet shape (the A3 gateway advertises no capabilities at all yet) and
+        # a client can rehearse the capability gate. Pass it to rehearse the happy path:
+        #     MockRobot(capabilities=["task_jog", "record", "pose_targets"])
+        self.capabilities = (
+            ["task_jog", "record"] if capabilities is None else list(capabilities)
+        )
         self._on_send = on_send
         self.received: list[dict[str, Any]] = []
         self.link_mode = ""
@@ -155,6 +165,7 @@ class MockRobot:
         self._elapsed = 0.0  # seconds accumulated via step(); the double's whole clock
         self._last_control_at = 0.0
         self.dropped_motion_frames = 0
+        self.dropped_pose_frames = 0
         self._layout_sends = 0
         self._session_open = False
         self._episode_counter = 0
@@ -282,12 +293,12 @@ class MockRobot:
             "protocol_version": self.protocol_version,
             # Advisory label so logs name the double honestly (never branch on it).
             "model": "MOCK",
-            # The TRUTHFUL set of optional verbs this double honours (spec ack.json).
-            # Deliberately NOT "pose_targets": this mock refuses to invent kinematics
-            # (see step()'s docstring), so a pose frame would be silently dropped —
-            # and RemoteTeleop.pose() raising against this ack is the correct
-            # teaching, not a gap. Lets client code rehearse capability gating.
-            "capabilities": ["task_jog", "record"],
+            # The TRUTHFUL set of optional verbs this double honours (spec ack.json), and
+            # handle() enforces it -- advertise and it is served, omit and it is dropped, so
+            # the two can never disagree. "pose_targets" is off by default: this mock invents
+            # no kinematics, the current A3 gateway advertises nothing at all, and pose()
+            # raising against that ack is the correct teaching rather than a gap.
+            "capabilities": list(self.capabilities),
         }
         if self.descriptor is not None:
             ack["norm_mode"] = "range_m100_100"
@@ -343,6 +354,13 @@ class MockRobot:
                 self.jog = message["jog"]
             replies = []
             pose = message.get("pose")
+            # Dropped in SILENCE when unadvertised -- which is what a real robot does with a
+            # verb it does not implement, and the behaviour the ack above promises. Serving it
+            # anyway would make the double MORE capable than it claims, so a client that
+            # ignored the capability gate would pass here and fail on hardware.
+            if "pose_targets" not in self.capabilities:
+                self.dropped_pose_frames += 1
+                pose = None
             if isinstance(pose, dict) and not self.estopped:
                 # pose (capability pose_targets): the double has no IK — it
                 # accepts the shape and teleports the arm's telemetry a
