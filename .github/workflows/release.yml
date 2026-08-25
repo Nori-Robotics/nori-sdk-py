@@ -1,0 +1,55 @@
+name: release
+
+# Publishes to PyPI when a version tag is pushed, via Trusted Publishing (OIDC) — no stored
+# API token anywhere. THE TAG IS THE PUBLISH BUTTON: push v1.0.0 and this ships it, so the
+# tag comes after everything else (bench verification, README status flip), never before.
+#
+# One-time PyPI setup, doable BEFORE the project exists ("pending publisher"):
+#   pypi.org -> your account -> Publishing -> add a pending publisher:
+#     project "nori-sdk", owner "Nori-Robotics", repo "nori-sdk-py",
+#     workflow "release.yml", environment "pypi"
+#   Then in this repo's Settings -> Environments, create "pypi" (add required reviewers
+#   there if you want a human approval gate between the tag and the upload).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - name: Assert the tag matches the package version
+        # A v1.0.1 tag on a tree still declaring 1.0.0 would publish a version that
+        # contradicts its own metadata; PyPI would then refuse the NEXT honest upload.
+        run: |
+          v=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "v$v" = "${GITHUB_REF_NAME}" || { echo "::error::tag ${GITHUB_REF_NAME} != pyproject version $v"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # The OIDC claim PyPI verifies names this environment; it also gives you a place to
+    # require manual approval before anything irreversible happens.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
