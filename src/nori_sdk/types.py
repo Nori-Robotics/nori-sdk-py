@@ -292,8 +292,9 @@ class RobotInfo:
         silently disable working features on every older robot in the fleet. An unrecognised
         capability name is not an error; treat it as one this SDK does not model.
 
-        Known values: task_jog, leader_action_deg, lift_targets, record, policy_stream, call,
-        perception. The list is a UNION built along the path — a daemon lists what it honours
+        Known values: task_jog, pose_targets, leader_action_deg, lift_targets, record,
+        policy_stream, call, perception. The list is a UNION built along the path — a daemon
+        lists what it honours
         and a bridge appends what it adds on top — so never infer WHICH component provides a
         capability from the fact that it is present."""
         if self.capabilities is None:

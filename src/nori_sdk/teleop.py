@@ -2,8 +2,7 @@
 
 The Python counterpart of @nori/sdk's RemoteTeleop. Same protocol, same role (we are always
 the ANSWERER), same defensive posture; different concurrency model — this is asyncio-native
-because aiortc is, with a synchronous facade in sync.py for scripts that don't want an event
-loop.
+because aiortc is. (No synchronous facade yet — see README "Not built yet".)
 
     from nori_sdk import RemoteTeleop, SupabaseSignaling, UserAuth
 
@@ -13,7 +12,7 @@ loop.
     async with RemoteTeleop(sig) as robot:
         await robot.wait_ready()
         print(robot.info.descriptor.joints)
-        await robot.jog({"base": {"x": 0.5}}, duration=1.0)
+        await robot.jog({"base": {"linear": 0.5}}, duration=1.0)
         await robot.action({"left_arm_gripper.pos": 30}, wait=True)
 
 TWO DIVERGENCES FROM THE BROWSER SDK, both forced by aiortc and both load-bearing:
@@ -81,6 +80,10 @@ ACTION_HISTORY = 256
 ROBOT_WAIT_S = 20.0
 RETRY_S = 2.0
 
+# What stop() pushes into every live stream() queue: the consumer's await lives in the
+# caller's own task, which stop() cannot cancel, so it must be WOKEN to find out.
+_STREAM_CLOSED = object()
+
 
 class TeleopError(RuntimeError):
     """A session-level failure: refused, unreachable, or torn down mid-call."""
@@ -146,6 +149,7 @@ class RemoteTeleop:
         self._pending_actions: dict[str, asyncio.Future[ActionStatus]] = {}
         self._record_waiters: list[asyncio.Future[RecordState]] = []
         self._policy_waiters: list[asyncio.Future[PolicyStreamStatus]] = []
+        self._stream_queues: set[asyncio.Queue[Any]] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._jog_payload: dict[str, Any] | None = None
         self._jog_task: asyncio.Task[Any] | None = None
@@ -192,6 +196,11 @@ class RemoteTeleop:
         await self.stop_jog()
         for task in list(self._tasks):
             task.cancel()
+        # Wake every stream() consumer: their awaits live in CALLER tasks, which the
+        # cancellations above cannot reach. _put_drop_oldest guarantees the sentinel
+        # lands even in a full queue a slow consumer may never drain.
+        for queue in list(self._stream_queues):
+            _put_drop_oldest(queue, _STREAM_CLOSED)
         with contextlib.suppress(Exception):
             self._signaling.send_bye()
         with contextlib.suppress(Exception):
@@ -588,8 +597,54 @@ class RemoteTeleop:
 
     def estop(self) -> None:
         """Latch E-STOP. Motion stays blocked until reset_latch(). Deliberately synchronous
-        and un-awaited: it must not be able to block behind anything."""
-        self._send(protocol.command("estop"))
+        and un-awaited: it must not be able to block behind anything.
+
+        Raises TeleopError in EVERY mode — not just strict — when the frame could not be
+        handed to an open channel. Ordinary verbs drop silently on a dead channel because
+        the watchdog makes the drop meaningless; an E-STOP that went nowhere is the one
+        drop a caller must not be able to mistake for success — they need to reach for
+        the physical button instead. The check is a local readyState read, so this still
+        cannot block. Delivery is not execution: the channel is lossy and the robot drops
+        command frames without reply while its motion stack is down — an unattended caller
+        should use estop_confirmed()."""
+        if not self._send(protocol.command("estop")):
+            raise TeleopError(
+                "estop: control channel is not open — the frame went NOWHERE. This session "
+                "cannot stop the robot; use the physical E-STOP or the robot's face button."
+            )
+
+    async def estop_confirmed(self, timeout: float = 2.0) -> None:
+        """estop(), then await the robot REPORTING the latch in telemetry.
+
+        Closes the two drop paths estop() cannot see: the channel is unreliable by design
+        (a sent frame can still vanish in flight) and the robot drops command frames with
+        no reply while its motion stack is down. Confirmation is OBSERVED STATE, not an
+        ack — the safety block rides telemetry at ~5 Hz, so a real latch is visible well
+        inside the default timeout. Raises TeleopError when no latch is seen in time, and
+        the only safe reading of that is "the robot is NOT stopped".
+
+        Only a report observed AFTER the send counts. The cached merged frame is
+        deliberately not consulted: _merge_telemetry carries the safety block forward, so
+        a stale "latched" from minutes ago — telemetry stalled, latch since cleared at the
+        robot — would confirm an estop that went nowhere."""
+        latched: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        def _check(frame: Any) -> None:
+            if getattr(frame, "safety", None) == "latched" and not latched.done():
+                latched.set_result(None)
+
+        # Subscribed BEFORE the send, so a fast robot cannot reply into the gap.
+        unsubscribe = self.on("telemetry", _check)
+        try:
+            self.estop()
+            await asyncio.wait_for(latched, timeout)
+        except TimeoutError:
+            raise TeleopError(
+                f"estop sent but the robot never reported the latch within {timeout:.1f}s — "
+                "assume it is NOT stopped (motion stack down, or the frame was lost)"
+            ) from None
+        finally:
+            unsubscribe()
 
     def reset_latch(self) -> None:
         """Clear a latched E-STOP, re-enabling motion. The counterpart to estop().
@@ -708,12 +763,21 @@ class RemoteTeleop:
 
     # --- video frames ----------------------------------------------------------------------
 
-    async def frames(self) -> AsyncIterator[Any]:
+    async def frames(self, track_timeout: float = ROBOT_WAIT_S) -> AsyncIterator[Any]:
         """Yield decoded video frames (av.VideoFrame) from the composite track.
 
         One H.264 track carries every camera as tiles; use camera_layout.rect(role) to crop
-        one. Yields nothing until the track arrives, so await wait_connected() first."""
+        one. Await wait_connected() first. Raises TeleopError when no track arrives within
+        `track_timeout`: a session is perfectly healthy with video down (control and
+        telemetry are independent of it), and an unattended caller needs that as a NAMED
+        failure, not an infinite poll — snapshot()/snapshot_png() inherit the same raise."""
+        deadline = time.monotonic() + track_timeout
         while self._video_track is None and not self._stopped:
+            if time.monotonic() >= deadline:
+                raise TeleopError(
+                    f"no video track within {track_timeout:.0f}s — is the robot's video "
+                    "pipeline up? (motion and telemetry work without it)"
+                )
             await asyncio.sleep(0.1)
         track = self._video_track
         while track is not None and not self._stopped:
@@ -722,12 +786,16 @@ class RemoteTeleop:
             except Exception:  # track ended (robot restart / teardown)
                 return
 
-    async def snapshot(self, role: str | None = None, settle: float = 0.3) -> Any:
+    async def snapshot(
+        self, role: str | None = None, settle: float = 0.3,
+        track_timeout: float = ROBOT_WAIT_S,
+    ) -> Any:
         """One frame, optionally cropped to a camera role. `settle` discards frames first so
-        an auto-exposing camera isn't captured mid-adjust."""
+        an auto-exposing camera isn't captured mid-adjust. `track_timeout` bounds the wait
+        for the video track itself and raises the named no-track error — see frames()."""
         deadline = time.monotonic() + settle
         frame = None
-        async for frame in self.frames():
+        async for frame in self.frames(track_timeout=track_timeout):
             if time.monotonic() >= deadline:
                 break
         if frame is None:
@@ -744,7 +812,10 @@ class RemoteTeleop:
             int(y * height) : int((y + h) * height), int(x * width) : int((x + w) * width)
         ]
 
-    async def snapshot_png(self, role: str | None = None, settle: float = 0.3) -> bytes:
+    async def snapshot_png(
+        self, role: str | None = None, settle: float = 0.3,
+        track_timeout: float = ROBOT_WAIT_S,
+    ) -> bytes:
         """One frame as PNG file bytes — the shape a trial-artifact writer wants.
 
         Same semantics as snapshot(); the whole composite is encoded when `role`
@@ -754,7 +825,7 @@ class RemoteTeleop:
         needs; API-side image caps are per-image)."""
         from . import _png
 
-        frame = await self.snapshot(role=role, settle=settle)
+        frame = await self.snapshot(role=role, settle=settle, track_timeout=track_timeout)
         image = frame if hasattr(frame, "shape") else frame.to_ndarray(format="rgb24")
         return _png.encode_rgb24(image)
 
@@ -774,20 +845,22 @@ class RemoteTeleop:
 
     async def stream(self, kind: str, maxsize: int = 16) -> AsyncIterator[Any]:
         """Async-iterate one frame kind. The queue drops the OLDEST frame when a slow
-        consumer falls behind — for telemetry, stale data is worse than missing data."""
+        consumer falls behind — for telemetry, stale data is worse than missing data.
+
+        Ends when the session stops. That needs a sentinel rather than a flag check:
+        the consumer's `await` lives in the CALLER's task, which stop() cannot cancel,
+        so without the wake-up a loop parked on an idle stream would sleep forever."""
         queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=maxsize)
-
-        def push(value: Any) -> None:
-            if queue.full():
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    queue.get_nowait()
-            queue.put_nowait(value)
-
-        unsubscribe = self.on(kind, push)
+        unsubscribe = self.on(kind, lambda value: _put_drop_oldest(queue, value))
+        self._stream_queues.add(queue)
         try:
             while not self._stopped:
-                yield await queue.get()
+                value = await queue.get()
+                if value is _STREAM_CLOSED:
+                    return
+                yield value
         finally:
+            self._stream_queues.discard(queue)
             unsubscribe()
 
     def _emit(self, kind: str, value: Any) -> None:
@@ -818,7 +891,14 @@ class RemoteTeleop:
             self._set_phase("failed", "signaling_unreachable", state)
 
     def _on_robot_here(self, _payload: dict[str, Any]) -> None:
-        self._connected.clear()
+        # Do NOT clear _connected here. The gateway broadcasts robot_here on EVERY room
+        # join — including its own signaling auto-reconnect mid-session — and it ignores
+        # re-readys while a session exists, so clearing would mark a healthy peer
+        # connection disconnected FOREVER (strict mode then refuses every verb). Like the
+        # two handlers above, a live session rides it out: _connected is owned by the
+        # connection-state callback alone. The ready is still sent — ignored by a gateway
+        # that already has us, and exactly what triggers a fresh offer from one that
+        # restarted (its old peer dies on its own clock and re-answers from there).
         self._log("robot announced — sending 'ready'")
         self._send_ready()
 
@@ -1008,17 +1088,24 @@ class RemoteTeleop:
         except Exception:
             pass  # getStats is best-effort; defaulting to "wan" is the safe direction
         self._link_mode = mode
-        self._send(protocol.link(mode))
-        self._log(f"link -> {mode}")
+        if self._send(protocol.link(mode)):
+            self._log(f"link -> {mode}")
+        else:
+            # Connection state can beat the datachannel event; the stored mode is
+            # re-sent by _setup_control the moment the robot's channel arrives.
+            self._log(f"link resolved -> {mode} (channel not up yet; sent on channel open)")
 
     def _setup_control(self, channel: Any) -> None:
         self._control = channel
 
-        @channel.on("open")
-        def _on_open() -> None:
+        def _announce_open() -> None:
             self._log("control channel open")
             if self._link_mode:
                 self._send(protocol.link(self._link_mode))
+
+        @channel.on("open")
+        def _on_open() -> None:
+            _announce_open()
 
         @channel.on("close")
         def _on_close() -> None:
@@ -1028,6 +1115,13 @@ class RemoteTeleop:
         @channel.on("message")
         def _on_message(raw: Any) -> None:
             self._handle_frame(raw)
+
+        # The ROBOT opens this channel, so aiortc hands it to us already open — its "open"
+        # event fired before we could subscribe and will never fire again. Run the open
+        # logic now, or the link-mode resend above is dead code: when _detect_link_mode
+        # raced ahead of the channel its send dropped silently, and this is the only retry.
+        if getattr(channel, "readyState", "") == "open":
+            _announce_open()
 
     # --- inbound ---------------------------------------------------------------------------
 
@@ -1091,14 +1185,21 @@ class RemoteTeleop:
 
     # --- internals -------------------------------------------------------------------------
 
-    def _send(self, frame: dict[str, Any]) -> None:
+    def _send(self, frame: dict[str, Any]) -> bool:
+        """True when the frame was handed to an open channel, False when it was dropped.
+
+        Dropping is correct: the control channel is unreliable by design and the robot is
+        watchdogged, so a frame sent into a dead channel has no meaning to preserve. But a
+        caller must not claim delivery it didn't get — log on the return value, not on
+        having called this."""
         channel = self._control
         if channel is None or getattr(channel, "readyState", "") != "open":
-            # Dropping is correct: the control channel is unreliable by design and the robot
-            # is watchdogged, so a frame sent into a dead channel has no meaning to preserve.
-            return
-        with contextlib.suppress(Exception):
+            return False
+        try:
             channel.send(protocol.encode(frame))
+        except Exception:
+            return False
+        return True
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -1121,6 +1222,16 @@ class RemoteTeleop:
         if self._log_cb is not None:
             with contextlib.suppress(Exception):
                 self._log_cb(message)
+
+
+def _put_drop_oldest(queue: asyncio.Queue[Any], value: Any) -> None:
+    """Insert unconditionally: a full queue sheds its OLDEST entry first. One definition,
+    shared by stream()'s push path and stop()'s sentinel, so the overflow policy cannot
+    diverge between the path that fills a queue and the one that must always wake it."""
+    if queue.full():
+        with contextlib.suppress(asyncio.QueueEmpty):
+            queue.get_nowait()
+    queue.put_nowait(value)
 
 
 def _zeroed(payload: dict[str, Any]) -> dict[str, Any]:

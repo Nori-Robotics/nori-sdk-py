@@ -58,7 +58,7 @@ from .types import (
 )
 from .version import NORI_PROTOCOL_VERSION
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 if TYPE_CHECKING:  # import for type checkers only; runtime stays lazy
     from .signaling_supabase import SupabaseSignaling

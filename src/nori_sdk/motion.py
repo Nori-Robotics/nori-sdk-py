@@ -79,7 +79,7 @@ class JogBuilder:
         jog = (JogBuilder(info.descriptor)
                .arm("left", "shoulder_pan", 0.5)
                .lift("left", -0.2)
-               .base(x=1.0)
+               .base(linear=1.0)
                .build())
 
     Setting a DOF the robot doesn't have raises ValueError — a typo'd joint name would

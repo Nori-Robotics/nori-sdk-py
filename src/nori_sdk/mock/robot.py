@@ -82,6 +82,11 @@ JOG_SCALE = 40.0
 # speed (~0.05 m/s), but as with JOG_SCALE, nothing should depend on the match.
 CENTRAL_LIFT_MM_PER_S = 50.0
 
+# Task-space arm jog verbs the gateway accepts alongside joint shorts (nori_ws motion.py
+# TASK_SHORTS). Integrated under their own name -- see step() -- because resolving them into
+# joints would be inventing kinematics this SDK has no business claiming to know.
+TASK_SHORTS = ("x", "y", "z", "pitch", "shoulder_pan")
+
 # (t_warn_ms, t_stop_ms) per link mode. The ROBOT owns these -- the client only reports which
 # network it is on, via `link`, and the robot picks. Hard-coded in both real stacks too.
 WATCHDOG_PROFILES = {"lan": (150.0, 500.0), "wan": (300.0, 1000.0)}
@@ -131,12 +136,16 @@ class MockRobot:
         self.action_outcome = action_outcome
         # The optional verbs this double HONOURS -- and it honours exactly these, no more:
         # handle() checks this list before acting, so the double can never quietly serve a
-        # verb it did not advertise. Default omits "pose_targets" so the out-of-the-box mock
-        # is the common fleet shape (the A3 gateway advertises no capabilities at all yet) and
-        # a client can rehearse the capability gate. Pass it to rehearse the happy path:
-        #     MockRobot(capabilities=["task_jog", "record", "pose_targets"])
+        # verb it did not advertise. The default is what a healthy A3 gateway sends with
+        # motion and the recorder up (nori_ws protocol.py on_channel_open: task_jog,
+        # pose_targets, record) -- the mock used to omit pose_targets on the claim that the
+        # gateway advertised nothing, which stopped being true and made pose() raise here
+        # while working on hardware. Trim the list to rehearse the capability gate:
+        #     MockRobot(capabilities=["task_jog", "record"])   # pose() refuses pre-flight
         self.capabilities = (
-            ["task_jog", "record"] if capabilities is None else list(capabilities)
+            ["task_jog", "pose_targets", "record"]
+            if capabilities is None
+            else list(capabilities)
         )
         self._on_send = on_send
         self.received: list[dict[str, Any]] = []
@@ -231,8 +240,18 @@ class MockRobot:
         # on its first draft, and it would have taught a script exactly the wrong lesson.
         self._set_base_velocity(self.jog.get("base"))
 
+        # Unknown jog vocabulary is dropped in SILENCE, exactly as the gateway drops it:
+        # apply_jog only ever reads the groups its model has, and _integrate_arm_jog skips
+        # any short its keymap lacks (jog has no reply channel, so there is nothing louder
+        # to do). The mock used to integrate ANY group and invent telemetry keys for it,
+        # which let a typo'd group read as working motion. No descriptor = no vocabulary
+        # to check, so the legacy-robot mock stays permissive.
+        joints = self._joint_vocab()
+        aux = self.descriptor.get("aux", []) if self.descriptor else None
         for group, value in self.jog.items():
             if group in ("left_lift", "right_lift", "lift"):
+                if aux is not None and group not in aux:
+                    continue  # a rail this robot doesn't have: the gateway never reads it
                 # Bare-scalar lifts. "lift" is the A-series central column and its
                 # telemetry unit is MILLIMETERS, so it advances on its own scale —
                 # 50 mm/s at full rate, matching the real Pico's normal-PWM speed —
@@ -241,7 +260,15 @@ class MockRobot:
                     scale = CENTRAL_LIFT_MM_PER_S if group == "lift" else JOG_SCALE
                     self._advance(f"{group}.pos", float(value) * dt * scale)
             elif group != "base" and isinstance(value, dict):
+                if joints is not None and not any(
+                    key.startswith(group + "_") for key in joints
+                ):
+                    continue  # not an arm group on this robot: never read, no motion
                 for dof, rate in value.items():
+                    if joints is not None and (
+                        f"{group}_{dof}.pos" not in joints and dof not in TASK_SHORTS
+                    ):
+                        continue  # unknown short: skipped in silence, like the keymap miss
                     if isinstance(rate, (int, float)) and not isinstance(rate, bool):
                         self._advance(f"{group}_{dof}.pos", float(rate) * dt * JOG_SCALE)
 
@@ -251,10 +278,22 @@ class MockRobot:
         self.pose["theta.vel"] = float(rates.get("angular", 0.0) or 0.0)
 
     def _advance(self, key: str, delta: float) -> None:
-        ranges = (self.descriptor or {}).get("ranges", {}) if self.descriptor else {}
+        ranges = self.descriptor.get("ranges", {}) if self.descriptor else {}
         low, high = ranges.get(key, (-100.0, 100.0))
         # Clamped, never rejected -- the same contract the real robot offers.
         self.pose[key] = min(max(self.pose.get(key, 0.0) + delta, low), high)
+
+    def _joint_vocab(self) -> list[str] | None:
+        """The joint keys motion vocabulary is validated against; None means "no vocabulary".
+
+        None ONLY when there is no descriptor at all (the legacy-robot mock): the client was
+        told nothing, so both motion paths stay permissive, honestly. A descriptor WITHOUT a
+        "joints" key is a vocabulary — an empty one — and is strict. One definition for the
+        jog, action and pose paths: reading it three different ways once left the same robot
+        permissive about an action and strict about a jog for the same missing key."""
+        if self.descriptor is None:
+            return None
+        return self.descriptor.get("joints") or []
 
     def telemetry(self, state: dict[str, float] | None = None, with_status: bool = True) -> str:
         """One telemetry frame. Defaults to the integrated pose; pass `state` to force it."""
@@ -295,9 +334,7 @@ class MockRobot:
             "model": "MOCK",
             # The TRUTHFUL set of optional verbs this double honours (spec ack.json), and
             # handle() enforces it -- advertise and it is served, omit and it is dropped, so
-            # the two can never disagree. "pose_targets" is off by default: this mock invents
-            # no kinematics, the current A3 gateway advertises nothing at all, and pose()
-            # raising against that ack is the correct teaching rather than a gap.
+            # the two can never disagree.
             "capabilities": list(self.capabilities),
         }
         if self.descriptor is not None:
@@ -361,7 +398,7 @@ class MockRobot:
             if "pose_targets" not in self.capabilities:
                 self.dropped_pose_frames += 1
                 pose = None
-            if isinstance(pose, dict) and not self.estopped:
+            if isinstance(pose, dict):
                 # pose (capability pose_targets): the double has no IK — it
                 # accepts the shape and teleports the arm's telemetry a
                 # plausible step so scripts see motion, then runs the same
@@ -369,19 +406,50 @@ class MockRobot:
                 # this stage rehearses PROTOCOL flow only.
                 action_id = message.get("action_id")
                 sides = [k[:-4] for k in pose if k.endswith("_arm")]
-                if action_id and sides:
+                if self.estopped:
+                    # The gateway refuses a latched pose with ONE terminal frame
+                    # (apply_pose: refuse("estop_latched")). Dropping it in silence
+                    # stranded a wait=True client into its own 10-15 s timeout — the
+                    # wrong estop shape to teach.
+                    if action_id:
+                        replies.append(self._emit({
+                            "type": "action_status", "action_id": action_id,
+                            "state": "blocked", "reason": "estop_latched",
+                            "ts_ns": time.time_ns()}))
+                elif action_id and sides:
                     side = sides[0]
+                    # The joints this robot actually HAS for that side. Teleporting a
+                    # hard-coded shoulder_pitch invented a telemetry key for an absent
+                    # arm -- the same class of lie the vocabulary checks exist to stop.
+                    side_joints = [
+                        key
+                        for key in (self._joint_vocab() or [])
+                        if key.startswith(f"{side}_arm_")
+                    ]
                     target = pose.get(f"{side}_arm") or {}
                     ok = (target.get("frame") == "base_footprint"
                           and isinstance(target.get("position_m"), list)
                           and len(target["position_m"]) == 3)
-                    if not ok:
+                    if self.descriptor is not None and not side_joints:
+                        # The gateway draws sides from the arms it has and refuses a
+                        # pose for one it doesn't (apply_pose: refuse("empty_pose")).
+                        replies.append(self._emit({
+                            "type": "action_status", "action_id": action_id,
+                            "state": "blocked", "reason": "empty_pose",
+                            "ts_ns": time.time_ns()}))
+                    elif not ok:
                         replies.append(self._emit({
                             "type": "action_status", "action_id": action_id,
                             "state": "blocked", "reason": "bad_pose",
                             "ts_ns": time.time_ns()}))
                     else:
-                        self._advance(f"{side}_arm_shoulder_pitch.pos", -5.0)
+                        # No descriptor = no vocabulary: the legacy-robot mock stays
+                        # permissive and nudges the conventional first joint.
+                        self._advance(
+                            side_joints[0] if side_joints
+                            else f"{side}_arm_shoulder_pitch.pos",
+                            -5.0,
+                        )
                         for state in self._action_lifecycle():
                             pose_frame: dict[str, Any] = {
                                 "type": "action_status",
@@ -391,15 +459,48 @@ class MockRobot:
                                 pose_frame["reason"] = "no_ik:-31"
                             replies.append(self._emit(pose_frame))
             if isinstance(message.get("action"), dict):
-                self.action.update(message["action"])
+                # The gateway checks every key against its keymap -- the calibrated arm
+                # joints -- and applies the ones it knows; keys it doesn't (or non-numeric
+                # values) collect into `unknown` (nori_ws motion.py apply_action). The mock
+                # used to accept ANY spelling and invent a range for it, so a client speaking
+                # a different robot's vocabulary stayed green here and failed on hardware.
+                # The vocabulary is the descriptor's joint list, the same thing the keymap
+                # represents on the wire — see _joint_vocab() for the no-descriptor case.
+                joints = self._joint_vocab()
+                applied: dict[str, float] = {}
+                unknown: list[str] = []
+                for key, target in message["action"].items():
+                    if (joints is not None and key not in joints) or not isinstance(
+                        target, (int, float)
+                    ):
+                        unknown.append(str(key))
+                    else:
+                        applied[key] = float(target)
                 if not self.estopped:
+                    self.action.update(applied)
                     # An absolute target lands in the pose, clamped. Without this a script
                     # that commands a position and then reads telemetry sees nothing move.
-                    for key, target in message["action"].items():
-                        if isinstance(target, (int, float)) and not isinstance(target, bool):
-                            self._advance(key, float(target) - self.pose.get(key, 0.0))
+                    for key, target in applied.items():
+                        self._advance(key, target - self.pose.get(key, 0.0))
                 action_id = message.get("action_id")
-                if action_id:
+                if action_id and not self.estopped and not applied:
+                    # Nothing matched this robot's key space: refuse loudly, ONE terminal
+                    # frame, same reason string as the gateway. Silently accepting used to
+                    # strand a real client in a 12 s await-done no-op whenever it spoke a
+                    # different robot's vocabulary -- the mock must refuse the same way.
+                    refusal: dict[str, Any] = {
+                        "type": "action_status",
+                        "action_id": action_id,
+                        "state": "blocked",
+                        "reason": (
+                            "unknown_joint:" + ",".join(sorted(unknown))
+                            if unknown
+                            else "empty_action"
+                        ),
+                        "ts_ns": time.time_ns(),
+                    }
+                    replies.append(self._emit(refusal))
+                elif action_id:
                     # The full lifecycle, not just the first frame. A real robot answers
                     # accepted -> active -> done; emitting only "accepted" made this double
                     # agree with a client that treated acceptance as completion, so the two
@@ -413,7 +514,9 @@ class MockRobot:
                             "ts_ns": time.time_ns(),
                         }
                         if state == "blocked":
-                            frame["reason"] = "latched"
+                            # The gateway's string (apply_action: "estop_latched"), not
+                            # the telemetry safety STATE "latched" — two vocabularies.
+                            frame["reason"] = "estop_latched"
                         replies.append(self._emit(frame))
             return replies
         if kind == "command":
@@ -530,6 +633,7 @@ __all__ = [
     "DEFAULT_LINK_MODE",
     "JOG_SCALE",
     "LAYOUT_REPEATS",
+    "TASK_SHORTS",
     "WATCHDOG_PROFILES",
     "MockRobot",
 ]
