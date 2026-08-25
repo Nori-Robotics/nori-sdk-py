@@ -9,7 +9,7 @@ import json
 import pytest
 
 from nori_sdk import protocol
-from nori_sdk.mock.robot import LAYOUT_REPEATS, MockRobot
+from nori_sdk.mock.robot import JOG_SCALE, LAYOUT_REPEATS, MockRobot
 
 
 def kinds(frames):
@@ -41,7 +41,7 @@ def test_ack_carries_the_descriptor_and_watchdog():
 
 def test_offline_robot_drops_motion_frames():
     robot = MockRobot(online=False)
-    robot.handle(protocol.control_jog(1, {"base": {"x": 1.0}}))
+    robot.handle(protocol.control_jog(1, {"base": {"linear": 1.0}}))
     assert robot.dropped_motion_frames == 1 and robot.jog == {}
 
 
@@ -59,7 +59,7 @@ def test_estop_latches_and_blocks_later_actions():
     _kind, status, _raw = protocol.decode(
         robot.handle(protocol.control_action(2, {"a.pos": 1}, "xyz"))[0]
     )
-    assert status.state == "blocked" and status.reason == "latched"
+    assert status.state == "blocked" and status.reason == "estop_latched"
     robot.handle(protocol.command("reset_latch"))
     assert not robot.estopped
 
@@ -144,6 +144,79 @@ def test_an_absolute_action_lands_in_the_pose():
     robot = MockRobot()
     robot.handle(protocol.control_action(1, {"left_arm_gripper.pos": 30.0}))
     assert robot.pose["left_arm_gripper.pos"] == 30.0
+
+
+# --- vocabulary: the mock refuses what the gateway refuses -------------------------------
+
+
+def test_an_action_of_unknown_joints_is_blocked_with_the_gateway_reason():
+    """The gateway refuses an action whose keys match nothing in its keymap with ONE
+    terminal blocked/"unknown_joint:<sorted keys>" frame (nori_ws motion.py apply_action).
+    The mock used to accept any spelling and invent a range for it, so a client speaking a
+    different robot's vocabulary stayed green here and failed on hardware."""
+    robot = MockRobot()
+    replies = robot.handle(protocol.control_action(1, {"b.pos": 1.0, "a.pos": 2.0}, "oops"))
+    assert len(replies) == 1  # terminal refusal, no accepted/active first
+    _kind, status, _raw = protocol.decode(replies[0])
+    assert status.state == "blocked"
+    assert status.reason == "unknown_joint:a.pos,b.pos"  # sorted, comma-joined
+    assert "a.pos" not in robot.pose and "b.pos" not in robot.pose
+
+
+def test_an_empty_action_is_blocked_as_empty_action():
+    robot = MockRobot()
+    _kind, status, _raw = protocol.decode(
+        robot.handle(protocol.control_action(1, {}, "hollow"))[0]
+    )
+    assert status.state == "blocked" and status.reason == "empty_action"
+
+
+def test_a_partially_unknown_action_applies_what_matched_and_is_accepted():
+    """Only a TOTAL miss refuses; known keys land and unknown ride along ignored, exactly
+    the gateway's split. A stricter mock would fail clients the hardware accepts."""
+    robot = MockRobot()
+    replies = robot.handle(
+        protocol.control_action(1, {"left_arm_gripper.pos": 30.0, "bogus.pos": 1.0}, "mix")
+    )
+    assert [protocol.decode(r)[1].state for r in replies] == ["accepted", "active", "done"]
+    assert robot.pose["left_arm_gripper.pos"] == 30.0
+    assert "bogus.pos" not in robot.pose
+
+
+def test_a_jog_for_vocabulary_this_robot_lacks_moves_nothing():
+    """Jog has no reply channel, so the gateway skips unknown vocabulary in SILENCE
+    (apply_jog never reads a group its model lacks; _integrate_arm_jog skips a keymap
+    miss). Silence, not motion: the mock must not invent telemetry keys for it."""
+    robot = MockRobot()  # the L2 shape: per-arm rails, no wrist_roll, no central lift
+    _jog(
+        robot,
+        {
+            "torso": {"bend": 1.0},           # a group no descriptor joint starts with
+            "left_arm": {"wrist_roll": 1.0},  # a short this arm doesn't have
+            "lift": 1.0,                      # the A-series column on an L-shaped robot
+        },
+    )
+    robot.step(0.5)
+    assert "torso_bend.pos" not in robot.pose
+    assert "left_arm_wrist_roll.pos" not in robot.pose
+    assert "lift.pos" not in robot.pose
+
+
+def test_task_space_jog_verbs_still_integrate_under_their_own_name():
+    # "x" is not a joint key; it is a task-space verb the gateway accepts (TASK_SHORTS),
+    # so the vocabulary check must let it through.
+    robot = MockRobot()
+    _jog(robot, {"left_arm": {"x": 1.0}})
+    robot.step(0.5)
+    assert robot.pose["left_arm_x.pos"] == pytest.approx(0.5 * JOG_SCALE)
+
+
+def test_no_descriptor_means_no_vocabulary_check():
+    """A robot that advertised nothing gave the mock nothing to validate against --
+    permissive is the honest reading of the legacy shape, not a gap."""
+    robot = MockRobot(descriptor=None)
+    replies = robot.handle(protocol.control_action(1, {"anything.pos": 5.0}, "leg"))
+    assert [protocol.decode(r)[1].state for r in replies] == ["accepted", "active", "done"]
 
 
 # --- the watchdog: the behaviour a script gets wrong locally and pays for on hardware ----
@@ -236,3 +309,40 @@ def test_the_layout_is_announced_independently_of_the_descriptor():
 def test_a_single_camera_mock_still_announces_no_layout():
     """Absence is the signal: the whole frame is that one camera."""
     assert kinds(MockRobot(cameras=False).on_channel_open()) == ["ack", "daemon_status"]
+
+
+# --- estop and vocabulary fidelity against the gateway -------------------------------------
+
+
+def test_estopped_pose_refuses_with_the_gateway_reason():
+    # The gateway answers ONE terminal frame (apply_pose: refuse("estop_latched"));
+    # silently dropping it stranded a wait=True client into its own 10-15 s timeout.
+    robot = MockRobot()
+    robot.estopped = True
+    replies = [json.loads(r) for r in robot.handle(
+        protocol.control_pose(1, "left", [0.3, 0.2, 0.5], action_id="p1"))]
+    assert [(f["state"], f["reason"]) for f in replies] == [("blocked", "estop_latched")]
+
+
+def test_pose_for_an_arm_the_robot_lacks_refuses_empty_pose():
+    # The gateway draws sides from the arms it HAS (apply_pose: refuse("empty_pose")).
+    # Teleporting a hard-coded joint invented telemetry for an absent arm.
+    robot = MockRobot(descriptor={"joints": ["left_arm_gripper.pos"], "ranges": {}})
+    replies = [json.loads(r) for r in robot.handle(
+        protocol.control_pose(1, "right", [0.3, 0.2, 0.5], action_id="p1"))]
+    assert [(f["state"], f["reason"]) for f in replies] == [("blocked", "empty_pose")]
+    assert "right_arm_shoulder_pitch.pos" not in robot.pose
+
+
+def test_jog_and_action_agree_on_a_descriptor_without_joints():
+    # A descriptor WITHOUT a "joints" key is an EMPTY vocabulary, not no vocabulary:
+    # both motion paths must be strict about it, or the same robot is simultaneously
+    # permissive about an action and silent about a jog for the same missing key.
+    robot = MockRobot(descriptor={"base": ["x.vel", "theta.vel"]})
+    replies = [json.loads(r) for r in robot.handle(
+        protocol.control_action(1, {"anything.pos": 5}, "a1"))]
+    assert [(f["state"], f["reason"]) for f in replies] == [
+        ("blocked", "unknown_joint:anything.pos")]
+    robot.handle(protocol.control_jog(2, {"anything": {"q": 1.0}}))
+    robot.step(1.0)
+    assert "anything.pos" not in robot.pose and "anything_q.pos" not in robot.pose

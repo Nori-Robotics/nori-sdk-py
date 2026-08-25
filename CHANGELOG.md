@@ -1,8 +1,65 @@
 # Changelog
 
-Newest first. This package is pre-release: it targets **nori-protocol v1** and is not yet
-verified against a physical robot — see the Status section of `README.md` for what that means
-in practice.
+Newest first. This package targets **nori-protocol v1** — see the Status section of
+`README.md` for what is and isn't hardware-verified.
+
+## 1.0.0 — 2026-08-25
+
+First public release. Everything below lands together; the headline items:
+
+### `estop()` now RAISES on a dead channel — a deliberate contract change
+
+Previously `estop()` returned `None` whether or not the frame flew, like every other verb.
+That is right for ordinary verbs (the watchdog makes a dropped frame meaningless) and wrong
+for the one frame whose silent loss a caller must not mistake for success. `estop()` now
+raises `TeleopError` in EVERY mode — not just strict — when the control channel is not open,
+so the caller knows to reach for the physical button. **Migration:** a bare
+`finally: robot.estop()` cleanup should become `try: robot.estop() except TeleopError: ...`
+(or log-and-continue), or the raise will mask the original exception.
+
+### `estop_confirmed()` — delivery is not execution
+
+New awaitable: sends the estop, then awaits the robot *reporting* the latch in telemetry.
+Only a report observed after the send counts — the cached merged frame is deliberately not
+consulted, since the safety block is carried forward and a stale "latched" would confirm an
+estop that went nowhere. Raises when no latch is seen; the only safe reading is "NOT stopped".
+
+### Base sign convention pinned against the spec fixture
+
+The SDK has always emitted raw REP-103 (+angular = LEFT, no client negation). The gateway
+formerly un-negated angular to compensate for a TypeScript-era L2 quirk, inverting this SDK's
+turns on A3/L3; that gateway change ships coordinated with this release, and a conformance
+test now pins this SDK's emission byte-for-byte against `control_jog_base.json` so the
+convention can never drift silently again.
+
+### Session robustness for unattended runs
+
+- A mid-session `robot_here` (the gateway rebroadcasts it on every signaling rejoin) no
+  longer marks a healthy session disconnected forever; `ready` is still sent, which is what
+  a genuinely restarted gateway needs to re-offer.
+- The link-mode handshake actually fires: the robot-opened channel arrives already open, so
+  the open logic now runs immediately instead of waiting for an `open` event that fired
+  before we could subscribe. LAN sessions get LAN watchdog windows.
+- `frames()` / `snapshot()` / `snapshot_png()` raise a named error (`track_timeout`,
+  default `ROBOT_WAIT_S`) instead of polling forever when no video track arrives; `stream()`
+  consumers are woken when the session stops instead of parking on an idle queue.
+
+### The mock now refuses what the gateway refuses
+
+Unknown action keys answer `blocked/"unknown_joint:<keys>"` (gateway-verbatim, incl.
+`empty_action`); unknown jog vocabulary is dropped in the same silence; a latched robot
+refuses a pose with `blocked/"estop_latched"` instead of silence, and action refusals say
+`"estop_latched"` (previously `"latched"`, a string no gateway emits); a pose for an arm the
+robot lacks refuses `blocked/"empty_pose"`; default capabilities now match a healthy A3
+gateway (`task_jog`, `pose_targets`, `record`), so `pose()` works against a plain
+`mock_session()` exactly as it does on hardware.
+
+### Documentation is no longer self-defeating
+
+The module headline example commanded `{"base": {"x": ...}}` — the telemetry-namespace
+spelling a robot reads as an explicit stop — and the `JogBuilder` docstring showed
+`.base(x=1.0)`, which raises. Both now use `linear`, as do the tests that pinned the old
+spelling.
 
 ## Unreleased — 2026-08-23
 

@@ -23,6 +23,7 @@ class FakeChannel:
     def __init__(self, robot: MockRobot | None = None, ready: str = "open") -> None:
         self.readyState = ready
         self.sent: list[dict] = []
+        self.handlers: dict[str, list] = {}
         self._robot = robot
         self._sink = None
 
@@ -31,6 +32,19 @@ class FakeChannel:
         if self._robot is not None and self._sink is not None:
             for reply in self._robot.handle(raw):
                 self._sink(reply)
+
+    def on(self, event: str):
+        """aiortc's decorator-style subscription, enough for _setup_control."""
+
+        def register(fn):
+            self.handlers.setdefault(event, []).append(fn)
+            return fn
+
+        return register
+
+    def fire(self, event: str) -> None:
+        for fn in self.handlers.get(event, ()):
+            fn()
 
 
 def session(robot: MockRobot | None = None, ready: str = "open"):
@@ -125,7 +139,7 @@ async def test_action_wait_reports_a_block_rather_than_raising():
     robot.estopped = True
     teleop, _channel = session(robot)
     status = await teleop.action({"a.pos": 1}, wait=True, timeout=1.0)
-    assert status.state == "blocked" and status.reason == "latched"
+    assert status.state == "blocked" and status.reason == "estop_latched"
 
 
 async def test_action_wait_times_out_with_the_daemon_state_in_the_message():
@@ -147,15 +161,15 @@ async def test_record_verbs_resolve_in_order_and_refusals_raise():
 
 async def test_jog_with_duration_streams_then_zeroes():
     teleop, channel = session()
-    await teleop.jog({"base": {"x": 0.5}}, duration=0.12, hz=50)
+    await teleop.jog({"base": {"linear": 0.5}}, duration=0.12, hz=50)
     jogs = [f["jog"] for f in channel.sent if f["type"] == "control"]
     assert len(jogs) > 2, "a held jog must be RESENT — silence is a stop command"
-    assert jogs[-1] == {"base": {"x": 0.0}}, "must end with an explicit zero"
+    assert jogs[-1] == {"base": {"linear": 0.0}}, "must end with an explicit zero"
 
 
 async def test_jog_seq_is_monotonic():
     teleop, channel = session()
-    await teleop.jog({"base": {"x": 0.5}}, duration=0.06, hz=50)
+    await teleop.jog({"base": {"linear": 0.5}}, duration=0.06, hz=50)
     seqs = [f["seq"] for f in channel.sent if "seq" in f]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
@@ -173,8 +187,37 @@ async def test_sends_are_dropped_when_the_channel_is_closed():
     # The control channel is unreliable by design and the robot is watchdogged, so a frame
     # sent into a dead channel has no meaning to preserve — dropping beats raising.
     teleop, channel = session(ready="closed")
-    teleop.estop()
+    teleop.reset_latch()
     assert channel.sent == []
+
+
+async def test_estop_raises_when_the_channel_is_dead_in_every_mode():
+    # The one exception to drop-silently: an E-STOP that went nowhere must not read as
+    # success, strict mode or not — the caller needs to reach for the physical button.
+    teleop, channel = session(ready="closed")
+    with pytest.raises(TeleopError, match="physical E-STOP"):
+        teleop.estop()
+    assert channel.sent == []
+
+
+async def test_estop_confirmed_resolves_on_the_reported_latch():
+    robot = MockRobot()
+    teleop, channel = session(robot)
+    task = asyncio.create_task(teleop.estop_confirmed(timeout=1.0))
+    await asyncio.sleep(0.02)  # estop frame is on the wire; robot latched but hasn't told us
+    assert {"type": "command", "estop": True} in channel.sent
+    teleop._handle_frame(robot.telemetry({}, with_status=True))  # the ~5 Hz status block
+    await task  # confirmation is the robot SAYING latched, not us having asked
+
+
+async def test_estop_confirmed_raises_when_the_latch_is_never_reported():
+    # Frame delivered, robot silent (motion stack down drops command frames without reply).
+    # The only safe reading is "NOT stopped".
+    robot = MockRobot()
+    robot.online = False
+    teleop, _channel = session(robot)
+    with pytest.raises(TeleopError, match="NOT stopped"):
+        await teleop.estop_confirmed(timeout=0.05)
 
 
 async def test_listeners_receive_parsed_frames_and_a_raising_one_is_contained():
@@ -218,3 +261,100 @@ async def test_wait_connected_surfaces_the_named_failure():
     teleop._set_phase("failed", "robot_absent", "no offer within 20s")
     with pytest.raises(TeleopError, match="robot_absent"):
         await teleop.wait_connected(timeout=0.05)
+
+
+# --- link-mode handshake (the channel arrives ALREADY open) ------------------------------
+
+
+async def test_link_mode_is_sent_when_the_channel_arrives_already_open():
+    # The robot opens the control channel, so aiortc delivers it with "open" already
+    # fired — a handler subscribed in _setup_control never runs. If link mode resolved
+    # first (connection state beat the datachannel event, so its own send dropped),
+    # the immediate re-send in _setup_control is the ONLY delivery.
+    operator, _robot = loopback_pair()
+    teleop = RemoteTeleop(operator)
+    teleop._link_mode = "lan"
+    channel = FakeChannel(ready="open")
+    teleop._setup_control(channel)
+    assert {"type": "link", "mode": "lan"} in channel.sent
+
+
+async def test_link_mode_waits_for_open_on_a_not_yet_open_channel():
+    operator, _robot = loopback_pair()
+    teleop = RemoteTeleop(operator)
+    teleop._link_mode = "lan"
+    channel = FakeChannel(ready="connecting")
+    teleop._setup_control(channel)
+    assert channel.sent == []  # nothing flies into a connecting channel
+    channel.readyState = "open"
+    channel.fire("open")
+    assert {"type": "link", "mode": "lan"} in channel.sent
+
+
+async def test_send_reports_delivery_honestly():
+    # Callers (estop, link logging) must be able to tell "sent" from "dropped".
+    from nori_sdk import protocol
+
+    teleop, channel = session()
+    assert teleop._send(protocol.link("lan")) is True
+    channel.readyState = "closed"
+    assert teleop._send(protocol.link("lan")) is False
+
+
+# --- signaling resilience (3.2) and unbounded waits (3.6) ---------------------------------
+
+
+async def test_robot_here_mid_session_does_not_kill_the_connection():
+    # The gateway broadcasts robot_here on EVERY room join — including its own signaling
+    # auto-reconnect while the peer stays healthy — and ignores re-readys while a session
+    # exists, so nothing would ever set _connected back. A live session must ride it out.
+    teleop, _channel = session(MockRobot())
+    teleop._connected.set()
+    teleop._on_robot_here({})
+    assert teleop.is_connected
+
+
+async def test_frames_raises_a_named_error_when_no_video_track_arrives():
+    # A session is healthy with video down; an unattended caller needs a NAMED failure,
+    # not an infinite 0.1 s poll. snapshot()/snapshot_png() inherit this raise.
+    teleop, _channel = session()
+    with pytest.raises(TeleopError, match="video track"):
+        async for _frame in teleop.frames(track_timeout=0.05):
+            break
+
+
+async def test_stream_ends_when_the_session_stops():
+    # The consumer's await lives in the CALLER's task, which stop() cannot cancel —
+    # without the sentinel wake-up this loop would park on queue.get() forever.
+    teleop, _channel = session(MockRobot())
+    seen: list[object] = []
+
+    async def consume() -> None:
+        async for frame in teleop.stream("telemetry"):
+            seen.append(frame)
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.02)  # consumer is parked on an idle stream
+    await teleop.stop()
+    await asyncio.wait_for(task, 1.0)  # returns instead of hanging
+    assert seen == []
+
+
+async def test_estop_confirmed_ignores_a_stale_cached_latch():
+    # _merge_telemetry carries the safety block forward, so the cached frame can say
+    # "latched" from minutes ago while the stream is stalled and the latch was since
+    # cleared at the robot. Only a report observed AFTER the send may confirm.
+    robot = MockRobot()
+    teleop, _channel = session(robot)
+    robot.estopped = True
+    teleop._handle_frame(robot.telemetry({}, with_status=True))  # stale cached latch
+    with pytest.raises(TeleopError, match="NOT stopped"):
+        await teleop.estop_confirmed(timeout=0.05)  # stream stalled: nothing arrives
+
+
+async def test_snapshot_propagates_the_track_timeout():
+    # A caller wanting a fast video-down verdict must not be forced to wait the
+    # full ROBOT_WAIT_S default.
+    teleop, _channel = session()
+    with pytest.raises(TeleopError, match="video track"):
+        await teleop.snapshot(track_timeout=0.05)

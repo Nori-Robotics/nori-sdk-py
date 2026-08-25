@@ -212,6 +212,20 @@ def test_base_jog_uses_the_jog_namespace():
     assert frame["jog"]["base"] == {"linear": 1.0, "angular": 0.5}
 
 
+def test_base_signs_match_the_spec_fixture_verbatim():
+    """The sign convention crosses three implementations (this SDK, @nori/sdk, the gateway)
+    and the audit found all three disagreeing — this SDK was the only one already on the
+    spec. The fixture IS the convention: linear 1.0 = full forward, angular 0.5 = half
+    LEFT (REP-103), and the builder must reproduce it byte-for-byte with NO negation
+    anywhere between base() and the wire. The L2 legacy flip is @nori/sdk's problem
+    (RemoteTeleop.wireJog, positive-L2-gated); this SDK never negates."""
+    fixture = dict(FIXTURES).get("daemon/control_jog_base.json")
+    assert fixture is not None, "spec lost its base-jog fixture"
+    built = protocol.control_jog(fixture["seq"], JogBuilder().base(linear=1.0, angular=0.5).build())
+    assert built["jog"] == fixture["jog"]
+    assert built["jog"]["base"]["angular"] == 0.5  # +left in, +left on the wire
+
+
 def test_the_old_base_spelling_is_rejected_rather_than_translated():
     """Silently mapping x->linear would be worse than the bug: it would leave every caller
     believing the telemetry namespace is jogable, and the next DOF added under one name and

@@ -42,6 +42,18 @@ async def test_a_script_written_against_the_mock_uses_only_public_api():
         robot.estop()
 
 
+async def test_pose_works_against_a_plain_mock_session():
+    """The default mock advertises what a healthy A3 gateway advertises -- pose_targets
+    included -- so pose() must work out of the box, exactly as it does on hardware. It
+    raising against the plain mock was audit finding A3: a double LESS capable than the
+    fleet teaches a client to route around a verb the robot honours."""
+    async with mock_session() as robot:
+        info = await robot.wait_ready()
+        assert info.supports("pose_targets") is True
+        status = await robot.pose("left", [0.4, 0.0, 0.9], wait=True, timeout=1.0)
+        assert status is not None and status.done
+
+
 async def test_telemetry_streams_and_reflects_what_was_commanded():
     async with mock_session(telemetry_hz=60.0) as robot:
         info = await robot.wait_ready()

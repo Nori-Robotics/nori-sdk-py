@@ -66,6 +66,16 @@ def test_base_omits_the_axis_you_did_not_set():
     assert JogBuilder(DESCRIPTOR).base(angular=-0.5).build() == {"base": {"angular": -0.5}}
 
 
+def test_base_never_negates_either_axis():
+    # REP-103 in, REP-103 out: +linear forward, +angular LEFT, verbatim on the wire (the
+    # spec fixture pins the same thing when the spec is present; this copy runs without it).
+    # The one robot that turns opposite (deployed L2, angular only) is compensated in the
+    # TS SDK's L2 model gate — never here, never for any other model.
+    assert JogBuilder(DESCRIPTOR).base(linear=0.4, angular=0.3).build() == {
+        "base": {"linear": 0.4, "angular": 0.3}
+    }
+
+
 def test_base_is_refused_on_a_robot_that_has_none():
     armonly = RobotDescriptor.from_wire({"joints": ["left_arm_gripper.pos"], "base": []})
     with pytest.raises(ValueError, match="no base"):

@@ -7,9 +7,10 @@ robot's ROS 2 gateway implements.
 It exists for the clients a browser SDK can't serve: headless scripts, policy and agent
 drivers, dataset tooling, CI that drives a robot (or a mock) without a browser.
 
-> **Status: sketch.** The pure layers (protocol, types, motion helpers, mock) are complete and
-> tested. `RemoteTeleop` is written but has **not yet been run against a real robot** — see
-> [Status](#status) for exactly what is and isn't verified.
+> **Status: v1.0.0.** The pure layers (protocol, types, motion helpers, mock) are complete,
+> tested and spec-conformant, and `RemoteTeleop` has driven real hardware — bench A3 sessions
+> (2026-08-21/22) shook out the WebRTC interop path and two watchdog bugs. See
+> [Status](#status) for exactly what is and isn't hardware-verified.
 
 ## Install
 
@@ -113,7 +114,7 @@ suite uses and `mock_session()` exists to replace.
 | **Lifecycle** | `start()` · `stop()` · `async with` · `wait_connected()` · `wait_ready() -> RobotInfo` |
 | **State** (properties) | `status` · `info` · `telemetry` · `daemon_status` · `camera_layout` · `is_connected` |
 | **Motion** | `jog(payload, duration=)` · `set_jog(payload)` · `stop_jog()` · `action(targets, wait=)` · `pose(side, position_m, orientation_xyzw=, wait=)` |
-| **Safety** | `estop()` · `reset_latch()` · `reset_arm(arm)` |
+| **Safety** | `estop()` · `estop_confirmed(timeout=)` · `reset_latch()` · `reset_arm(arm)` |
 | **Recording** | `record(verb, task=)` |
 | **Video** | `set_video_bitrate(kbps)` · `set_video_paused(bool)` · `frames()` · `snapshot(role=)` |
 | **Events** | `on(kind, cb) -> unsubscribe` · `stream(kind)` |
@@ -127,8 +128,16 @@ getting right, because the robot stops when frames stop:
 | `set_jog(payload)` | the SDK, until you clear it | interactive drivers |
 | `protocol.control_jog(…)` | **you**, inside `t_warn_ms` | your own transport |
 
+`estop()` is the one verb that **raises** on a dead control channel — in every mode, not just
+strict — because an E-STOP that silently went nowhere must not read as success (every other
+verb drops silently there, correctly: the watchdog makes the drop meaningless). Delivery is
+still not execution, so unattended runs use `estop_confirmed()`, which awaits the robot
+*reporting* the latch in telemetry and raises if it never does.
+
 `frames()` and `snapshot()` return `Any` because their type comes from `av`, an optional
-dependency — they yield `av.VideoFrame` when the `webrtc` extra is installed.
+dependency — they yield `av.VideoFrame` when the `webrtc` extra is installed. Both raise a
+named `TeleopError` when no video track arrives within `track_timeout`: a session is
+perfectly healthy with video down, and an unattended caller needs an error, not a hang.
 
 #### Cartesian pose targets — `pose()`
 
@@ -315,12 +324,24 @@ Verified against the spec:
 - `LoopbackSignaling` — in-process transport pair for handshake tests
 - `UserAuth` / `DeviceAuth` — Supabase token providers with refresh, skew clamping and backoff
 
-Written but **not yet verified against hardware** — expect to fix things here first:
+Hardware-verified — live bench A3 sessions (NORI-A3-0000, 2026-08-21/22) drove the robot
+through this SDK end-to-end:
 
-- `RemoteTeleop`'s WebRTC path: offer/answer, ICE, control channel, video track
-- `SupabaseSignaling` against the live Realtime service (the threading and reconnect logic is
-  a port of the gateway's proven implementation, but the operator role is new)
-- Link-mode detection from `getStats` (aiortc's stats shape differs from the browser's)
+- `RemoteTeleop`'s WebRTC path: offer/answer against GStreamer's webrtcbin (the RSA-cipher,
+  H.264-fmtp and ICE-trickle interop fixes in `webrtc_compat` are each hardware-confirmed),
+  the control channel, and live jog/action driving. The watchdog keep-alives inside
+  `action(wait=True)` and `pose(wait=True)` exist *because* those sessions found their
+  absence — both were hardware-found bugs, now fixed and pinned.
+- `SupabaseSignaling` against the live Realtime service, in the same sessions.
+
+Not yet verified against hardware — expect to check these first:
+
+- The **link-mode handshake**: it was dead code until 2026-08-25 (the robot-opened channel
+  arrives already open, so the `open` handler never fired). The fix is unit-tested; a live
+  LAN session has not yet confirmed the robot adopts the tighter watchdog profile, and
+  aiortc's `getStats` shape (which the LAN/WAN detection reads) differs from the browser's.
+- `estop_confirmed()`, `frames(track_timeout=)` and the stream shutdown wake-up (all
+  2026-08-25) are unit-tested against the mock, not yet exercised on hardware.
 
 Not built yet:
 

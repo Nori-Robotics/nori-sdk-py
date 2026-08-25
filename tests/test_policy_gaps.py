@@ -335,7 +335,9 @@ async def test_an_unadvertised_pose_verb_is_dropped_in_silence() -> None:
 
     from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
 
-    bot = MockRobot(descriptor=A3_DESCRIPTOR)  # default: no pose_targets
+    # Trimmed capabilities: the default now matches the fleet (pose_targets included), so
+    # rehearsing the gate means asking for a robot that explicitly lacks the verb.
+    bot = MockRobot(descriptor=A3_DESCRIPTOR, capabilities=["task_jog", "record"])
     async with mock_session(bot) as robot:
         info = await robot.wait_ready()
         assert info.supports("pose_targets") is False
@@ -356,7 +358,8 @@ async def test_the_typed_api_refuses_before_the_frame_flies() -> None:
     from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
     from nori_sdk.teleop import TeleopError
 
-    async with mock_session(MockRobot(descriptor=A3_DESCRIPTOR)) as robot:
+    bot = MockRobot(descriptor=A3_DESCRIPTOR, capabilities=["task_jog", "record"])
+    async with mock_session(bot) as robot:
         await robot.wait_ready()
         with pytest.raises(TeleopError, match="pose_targets"):
             await robot.pose("right", [0.4, 0.0, 0.9])
