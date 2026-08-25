@@ -894,11 +894,16 @@ class RemoteTeleop:
         # Do NOT clear _connected here. The gateway broadcasts robot_here on EVERY room
         # join — including its own signaling auto-reconnect mid-session — and it ignores
         # re-readys while a session exists, so clearing would mark a healthy peer
-        # connection disconnected FOREVER (strict mode then refuses every verb). Like the
-        # two handlers above, a live session rides it out: _connected is owned by the
-        # connection-state callback alone. The ready is still sent — ignored by a gateway
-        # that already has us, and exactly what triggers a fresh offer from one that
-        # restarted (its old peer dies on its own clock and re-answers from there).
+        # connection disconnected FOREVER (strict mode then refuses every verb — fatal
+        # to an unattended run). Like the two handlers above, a live session rides it
+        # out: _connected is owned by the connection-state callback alone.
+        #
+        # The ready is still sent, and unconditionally on purpose — NOT the sibling
+        # early-return-when-connected guard: a gateway that already has us ignores
+        # re-readys, and a gateway that RESTARTED (no session) needs one to offer. Its
+        # robot_here usually beats aiortc noticing the dead peer, and nothing else
+        # re-sends ready after that (_ready_retry_loop exits for good on first connect),
+        # so gating the send on !connected would stall restart recovery indefinitely.
         self._log("robot announced — sending 'ready'")
         self._send_ready()
 
