@@ -98,7 +98,6 @@ class RemoteTeleop:
         turn_urls: Iterable[str] = (),
         turn_user: str = "",
         turn_credential: str = "",
-        protocol_version: int | None = None,
         on_log: Callable[[str], None] | None = None,
         strict: bool = False,
     ) -> None:
@@ -107,7 +106,6 @@ class RemoteTeleop:
         self._turn_urls = list(turn_urls)
         self._turn_user = turn_user
         self._turn_credential = turn_credential
-        self._protocol_version = protocol_version
         self._log_cb = on_log
         # strict=True makes motion verbs RAISE instead of commanding into the void.
         # Two silent-drop paths exist by default: _send() drops when the channel is
@@ -230,7 +228,7 @@ class RemoteTeleop:
         if self._info.version_mismatch:
             self._log(
                 f"protocol version mismatch: robot speaks {self._info.protocol_version}, "
-                f"this SDK targets {self._protocol_version or NORI_PROTOCOL_VERSION} - "
+                f"this SDK targets {NORI_PROTOCOL_VERSION} - "
                 "proceeding; expect vocabulary gaps, not danger"
             )
         return self._info

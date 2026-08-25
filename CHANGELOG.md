@@ -7,6 +7,14 @@ Newest first. This package targets **nori-protocol v1** — see the Status secti
 
 First public release. Everything below lands together; the headline items:
 
+### Removed: the inert `RemoteTeleop(protocol_version=...)` kwarg
+
+It was stored and used only to format the mismatch log line — it never changed what the SDK
+emits or how mismatch is detected (`RobotInfo.from_wire` compares the robot's ack against
+this build's `NORI_PROTOCOL_VERSION`, which is what an SDK build actually speaks). The
+TypeScript SDK never had the option, for the same reason. Removed *before* the 1.0 API
+freeze; if a real override need appears, a working kwarg can return compatibly in a minor.
+
 ### `estop()` now RAISES on a dead channel — a deliberate contract change
 
 Previously `estop()` returned `None` whether or not the frame flew, like every other verb.
