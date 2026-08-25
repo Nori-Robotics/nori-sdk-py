@@ -818,6 +818,20 @@ class RemoteTeleop:
             self._set_phase("failed", "signaling_unreachable", state)
 
     def _on_robot_here(self, _payload: dict[str, Any]) -> None:
+        if self._connected.is_set():
+            # A live session rides out the robot's re-announcement. The gateway
+            # broadcasts robot_here on EVERY room join — including its own
+            # signaling auto-reconnect — and media is peer-to-peer, so a
+            # signaling blip never touched it. Clearing here stranded the
+            # session permanently: nothing re-sets the flag (_handle_conn_state
+            # only fires on an aiortc state CHANGE, which never comes), so in
+            # strict mode every later action/pose/jog raised "session is not
+            # connected" forever. That would kill an unattended run mid-way.
+            # A genuine robot restart still recovers: the peer connection fails,
+            # _handle_conn_state clears the flag, and _ready_retry_loop
+            # re-announces. Same guard as _on_signaling_state and _on_nack.
+            self._log("robot re-announced; session already live — ignoring")
+            return
         self._connected.clear()
         self._log("robot announced — sending 'ready'")
         self._send_ready()

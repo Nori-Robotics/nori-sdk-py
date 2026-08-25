@@ -360,3 +360,25 @@ async def test_the_typed_api_refuses_before_the_frame_flies() -> None:
         await robot.wait_ready()
         with pytest.raises(TeleopError, match="pose_targets"):
             await robot.pose("right", [0.4, 0.0, 0.9])
+
+
+@pytest.mark.asyncio
+async def test_robot_here_does_not_kill_a_live_session() -> None:
+    """The gateway broadcasts robot_here on EVERY room join, including its own
+    signaling reconnect. Clearing the connected flag there stranded a live
+    session forever (nothing re-sets it), so strict mode then refused every
+    subsequent command — fatal to an unattended capture run."""
+    from nori_sdk.mock import A3_DESCRIPTOR, MockRobot, mock_session
+
+    bot = MockRobot(descriptor=A3_DESCRIPTOR)
+    async with mock_session(bot, strict=True) as robot:
+        await robot.wait_ready()
+        assert robot.is_connected
+
+        robot._on_robot_here({})            # the robot re-announces mid-session
+
+        assert robot.is_connected, "a live session must ride out robot_here"
+        # and the typed API must still work rather than raising in strict mode
+        status = await robot.action({"right_arm_elbow_pitch.pos": 5.0}, wait=True,
+                                    timeout=5.0)
+        assert status is not None and status.done
