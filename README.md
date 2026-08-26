@@ -7,7 +7,7 @@ robot's ROS 2 gateway implements.
 It exists for the clients a browser SDK can't serve: headless scripts, policy and agent
 drivers, dataset tooling, CI that drives a robot (or a mock) without a browser.
 
-> **Status: v1.0.0.** The pure layers (protocol, types, motion helpers, mock) are complete,
+> **Status: stable (v1, on PyPI).** The pure layers (protocol, types, motion helpers, mock) are complete,
 > tested and spec-conformant. `RemoteTeleop` has driven real hardware: bench sessions on an
 > A3 verified the WebRTC interop path, the base sign convention, pose, link-mode, and the
 > estop confirmation behavior. See [Status](#status) for exactly what is and isn't
@@ -144,8 +144,8 @@ perfectly healthy with video down, and an unattended caller needs an error, not 
 
 `pose(side, position_m, orientation_xyzw=None, wait=False)` commands an absolute
 gripper-TCP pose and the **robot solves the IK on-board** — the wire never carries joint
-solutions, so every client shares one IK implementation instead of each shipping its own
-(the architecture the rpi4 era moved away from). Metres in `base_footprint` (fixed to the
+solutions, so every client shares one IK implementation instead of each shipping its
+own. Metres in `base_footprint` (fixed to the
 robot, stable across lift travel), REP-103 axes, optional ROS-order quaternion — omit it
 for "get the gripper to this point, any wrist angle" (v1 solves at the current wrist, so a
 position-only failure is worth retrying with an explicit orientation).
@@ -209,7 +209,9 @@ keeps it on A3** — no static set can classify a verb whose meaning inverts per
 
 `JogBuilder` · `joints_by_group` · `joint_group` · `joint_short` · `scale_to_range` · `clamp`.
 All descriptor-driven: pass `info.descriptor` and a DOF the robot lacks raises instead of
-being silently dropped robot-side.
+being silently dropped robot-side. Robots that advertise `jog_scale.task` also take
+task-space verbs (`x`/`y`/`z`/`pitch`/`yaw` — `shoulder_pan` is the deprecated alias of
+`yaw`) through the same `arm()` call.
 
 ### Mock — `nori_sdk.mock`
 
@@ -346,6 +348,17 @@ Not yet verified against hardware:
 
 - `frames(track_timeout=)` and the stream shutdown wake-up are unit-tested against the
   mock only.
+
+Planned next (committed direction, no dates):
+
+- **Gym-style env wrapper** — observation/action spaces built from the descriptor;
+  mock-backed so it runs in CI, and open to any session-shaped backend (real, mock, sim).
+- **Policy runner** — `run_policy(fn, hz=...)` that owns keepalives, health checks,
+  clean stop and estop-on-exception, so unattended runs don't hand-roll them.
+- **A small CLI** — `nori doctor` (connection diagnostics: room, ICE path, VPN/tunnel
+  detection, link health) plus connect/snapshot/drive conveniences.
+- **Auto-reconnecting sessions** — survive robot restarts and network blips, with
+  link-quality metrics exposed as first-class properties.
 
 Not built yet:
 

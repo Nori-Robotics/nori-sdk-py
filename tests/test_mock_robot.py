@@ -346,3 +346,16 @@ def test_jog_and_action_agree_on_a_descriptor_without_joints():
     robot.handle(protocol.control_jog(2, {"anything": {"q": 1.0}}))
     robot.step(1.0)
     assert "anything.pos" not in robot.pose and "anything_q.pos" not in robot.pose
+
+
+def test_discard_verbs_are_accepted_like_the_gateway():
+    # The gateway accepts all three discard verbs (they close the session, ok:true --
+    # episode-as-unit means nothing is deleted on this stack). The mock used to refuse
+    # them as unknown, so code following the SDK's own RecordVerb type raised against
+    # the sandbox.
+    robot = MockRobot()
+    for verb in ("session_discard", "discard", "discard_last"):
+        robot.handle(protocol.record("session_start"))
+        (reply,) = [json.loads(r) for r in robot.handle(protocol.record(verb))]
+        assert reply["ok"] is True
+        assert reply["session_open"] is False

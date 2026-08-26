@@ -608,7 +608,11 @@ class MockRobot:
                 if action != "episode_discard":
                     self._episodes_kept += 1
                 self._open_episode = ""
-        elif action == "session_end":
+        elif action in ("session_end", "session_discard", "discard", "discard_last"):
+            # All four just close the session, ok:true — gateway-verbatim. Episode-as-unit
+            # means each finalized episode already shipped independently, so "discard" here
+            # deletes nothing on this stack (it DOES destroy data on the L2 stack, which is
+            # why DESTRUCTIVE_RECORD_VERBS cannot classify it statically).
             self._session_open = False
         elif action != "status":
             error = f"unknown action {action}"

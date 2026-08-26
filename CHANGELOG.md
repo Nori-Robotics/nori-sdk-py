@@ -3,6 +3,23 @@
 Newest first. This package targets **nori-protocol v1** — see the Status section of
 `README.md` for what is and isn't hardware-verified.
 
+## 1.0.1 — 2026-08-26
+
+### `JogBuilder.arm()` accepts task-space verbs in strict mode
+
+Robots that advertise `descriptor.jog_scale.task` take task-space verbs ("x", "y", "z",
+"pitch", "yaw") through the same arm() call, and strict mode now knows that instead of
+rejecting them as unknown DOFs. "yaw" is the canonical angular-z verb; "shoulder_pan" is
+its deprecated alias, and each is accepted whenever the other is advertised. Robots with
+no `jog_scale.task` still reject task verbs, as before.
+
+### The mock accepts the discard record verbs
+
+`session_discard`, `discard` and `discard_last` are in the SDK's own `RecordVerb` type and
+the gateway accepts all three (they close the session; episode-as-unit means nothing is
+deleted on this stack) — but the mock refused them as unknown, so correct code raised
+against the sandbox. It now answers them gateway-verbatim.
+
 ## 1.0.0 — 2026-08-25
 
 First public release. Everything below lands together; the headline items:

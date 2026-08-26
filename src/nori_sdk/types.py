@@ -43,6 +43,9 @@ from .version import NORI_PROTOCOL_VERSION
 SafetyState = Literal["ok", "safe_hold", "latched"]
 
 ArmSide = Literal["left", "right"]
+# The wire value for task-space control stays "cylindrical" for compatibility; UIs display
+# it as "cartesian" on robots that advertise descriptor.jog_scale.task (verbs x/y/z/pitch/
+# yaw, with "shoulder_pan" as the deprecated alias of "yaw"). Only the label changed.
 ControlMode = Literal["cylindrical", "joint"]
 LinkMode = Literal["lan", "wan"]
 
@@ -114,7 +117,9 @@ class JogScale:
 
         joints  norm_mode units/s  — matches telemetry `state` and descriptor `ranges`
         lift    mm/s               — matches the mm of `<side>_lift.pos` targets
-        task    m/s (x, y), rad/s (pitch, shoulder_pan)
+        task    m/s (x, y, z), rad/s (pitch, yaw). "yaw" is the canonical angular-z verb;
+                "shoulder_pan" is its DEPRECATED alias and may appear alongside it.
+                L2 descriptors never carry `task` at all.
         base    m/s (linear), rad/s (angular)
 
     Joints are deliberately NOT rad/s: telemetry reports normalized positions, so a rad/s rate

@@ -131,6 +131,63 @@ def test_jog_rate_reads_each_namespace_in_its_own_units():
     assert jog_rate(SCALED, "lift") == 50.0                      # mm/s
 
 
+# A3-shaped descriptor: full task table with canonical "yaw" plus deprecated "shoulder_pan".
+A3 = RobotDescriptor.from_wire({
+    "joints": ["left_arm_elbow_pitch.pos", "left_arm_gripper.pos"],
+    "base": ["x.vel", "theta.vel"],
+    "aux": ["lift"],
+    "jog_scale": {
+        "joints": {"left_arm_elbow_pitch.pos": 12.2},
+        "task": {"x": 0.08, "y": 0.08, "z": 0.06, "pitch": 0.5, "yaw": 0.5,
+                 "shoulder_pan": 0.5},
+        "base": {"linear": 0.15, "angular": 0.60},
+        "lift": 50.0,
+    },
+})
+
+
+def test_strict_jog_builder_accepts_task_verbs_when_advertised():
+    payload = (
+        JogBuilder(A3)
+        .arm("left", "x", 0.3)
+        .arm("left", "yaw", -0.2)
+        .arm("left", "z", 0.1)
+        .build()
+    )
+    assert payload == {"left_arm": {"x": 0.3, "yaw": -0.2, "z": 0.1}}
+
+
+def test_strict_jog_builder_still_rejects_task_verbs_without_jog_scale_task():
+    # DESCRIPTOR carries no jog_scale at all -- behavior unchanged.
+    for verb in ("x", "yaw", "z"):
+        with pytest.raises(ValueError, match="no DOF"):
+            JogBuilder(DESCRIPTOR).arm("left", verb, 0.5)
+
+
+def test_yaw_and_shoulder_pan_alias_each_other_in_strict_mode():
+    yaw_only = RobotDescriptor.from_wire({
+        "joints": ["left_arm_elbow_pitch.pos"],
+        "jog_scale": {"task": {"yaw": 0.5}},
+    })
+    pan_only = RobotDescriptor.from_wire({
+        "joints": ["left_arm_elbow_pitch.pos"],
+        "jog_scale": {"task": {"shoulder_pan": 0.5}},
+    })
+    # Deprecated alias accepted where only the canonical verb is advertised, and vice versa.
+    assert JogBuilder(yaw_only).arm("left", "shoulder_pan", 0.5).build() == {
+        "left_arm": {"shoulder_pan": 0.5}
+    }
+    assert JogBuilder(pan_only).arm("left", "yaw", 0.5).build() == {
+        "left_arm": {"yaw": 0.5}
+    }
+
+
+def test_jog_rate_reads_yaw_and_z_from_the_task_table():
+    assert jog_rate(A3, "left_arm", "yaw") == 0.5
+    assert jog_rate(A3, "left_arm", "z") == 0.06
+    assert jog_rate(A3, "left_arm", "shoulder_pan") == 0.5  # deprecated alias, advertised
+
+
 def test_a_task_verb_is_not_looked_up_as_a_joint():
     """"pitch" and "x" are task-space VERBS with their own table -- on some models
     "shoulder_pan" is a task verb and not a joint name at all, so resolving verbs through the

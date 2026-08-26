@@ -96,8 +96,23 @@ class JogBuilder:
     def arm(self, side: str, dof: str, rate: float) -> JogBuilder:
         group = f"{side}_arm" if not side.endswith("_arm") else side
         if self._strict and dof not in self._known.get(group, []):
-            available = ", ".join(self._known.get(group, [])) or "none"
-            raise ValueError(f"{group} has no DOF {dof!r} on this robot (has: {available})")
+            # Task-space VERBS ("x", "pitch", "yaw") are not joints: a robot that advertises
+            # descriptor.jog_scale.task accepts them too. "yaw" is the canonical name for the
+            # angular-z verb and "shoulder_pan" its deprecated alias, so each is accepted
+            # whenever the other is advertised. No jog_scale.task -> task verbs still reject.
+            task = (
+                self._descriptor.jog_scale.task
+                if self._descriptor is not None and self._descriptor.jog_scale is not None
+                else {}
+            )
+            accepted = set(task)
+            if "yaw" in accepted or "shoulder_pan" in accepted:
+                accepted.update(("yaw", "shoulder_pan"))
+            if dof not in accepted:
+                available = ", ".join(self._known.get(group, []) + sorted(accepted)) or "none"
+                raise ValueError(
+                    f"{group} has no DOF {dof!r} on this robot (has: {available})"
+                )
         self._payload.setdefault(group, {})[dof] = clamp(rate)
         return self
 
@@ -235,8 +250,9 @@ def jog_rate(descriptor: RobotDescriptor | None, group: str, dof: str = "") -> f
     if group == BASE_GROUP:
         return scale.base.get(dof)
     if group in ARM_GROUPS:
-        # A task-space VERB ("x", "pitch") is not a joint and lives in its own table -- on
-        # some models "shoulder_pan" is a task verb and not a joint name at all.
+        # A task-space VERB ("x", "pitch", "yaw", "z") is not a joint and lives in its own
+        # table -- "yaw" is the canonical angular-z verb and "shoulder_pan" its deprecated
+        # alias; on some models "shoulder_pan" is a task verb and not a joint name at all.
         if dof in scale.task:
             return scale.task[dof]
         return scale.joints.get(f"{group}_{dof}.pos")
