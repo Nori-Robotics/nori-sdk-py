@@ -40,6 +40,19 @@ turns on A3/L3; that gateway change ships coordinated with this release, and a c
 test now pins this SDK's emission byte-for-byte against `control_jog_base.json` so the
 convention can never drift silently again.
 
+### Link-mode LAN detection actually works now (2026-08-26 bench findings)
+
+aiortc implements no candidate-pair stats, so the getStats-based LAN detection matched
+nothing and reported "wan" unconditionally — found on the 1.0 bench. Detection now reads
+aioice's nominated pairs directly (private-attribute walk that degrades to "wan" if an
+aiortc upgrade changes it), and deliberately refuses to call a VPN/overlay path "lan"
+even when its candidates are ICE-type host: a tunnel's 1280-byte MTU with the tight
+watchdog profile is the worst pairing (the same bench found Tailscale-carried sessions
+silently dropping every fragmented frame — if you run a VPN on the operator machine,
+prefer disabling it while driving). `estop_confirmed()`'s default timeout also widened
+2 s → 5 s: the latch report crosses gateway → safety node → telemetry, and 2 s proved
+tight on a busy stack.
+
 ### Session robustness for unattended runs
 
 - A mid-session `robot_here` (the gateway rebroadcasts it on every signaling rejoin) no

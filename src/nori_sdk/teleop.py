@@ -611,7 +611,7 @@ class RemoteTeleop:
                 "cannot stop the robot; use the physical E-STOP or the robot's face button."
             )
 
-    async def estop_confirmed(self, timeout: float = 2.0) -> None:
+    async def estop_confirmed(self, timeout: float = 5.0) -> None:
         """estop(), then await the robot REPORTING the latch in telemetry.
 
         Closes the two drop paths estop() cannot see: the channel is unreliable by design
@@ -1070,26 +1070,27 @@ class RemoteTeleop:
 
     async def _detect_link_mode(self) -> None:
         """Report the resolved network path so the robot picks its watchdog profile. Both
-        candidates 'host' means a direct same-subnet LAN link; anything else (STUN srflx,
-        TURN relay) is WAN, which buys a looser dead-man window."""
+        nominated candidates 'host' on non-tunnel addresses means a direct LAN link;
+        anything else (STUN srflx, TURN relay, a VPN/overlay address) is WAN, which buys
+        a looser dead-man window — the safe direction.
+
+        Read from aioice's nominated pairs, NOT getStats: aiortc implements no
+        candidate-pair stats at all, so the standards-shaped getStats loop this replaces
+        matched nothing and answered "wan" unconditionally (hardware-found 2026-08-26,
+        SDK 1.0 bench). The walk touches private attributes and is wrapped accordingly:
+        an aiortc upgrade that breaks it degrades to "wan", never to a false "lan"."""
         mode = "wan"
         try:
-            stats = await self._pc.getStats()
-            for report in stats.values():
-                if getattr(report, "type", "") == "candidate-pair" and getattr(
-                    report, "nominated", False
-                ):
-                    local = stats.get(getattr(report, "localCandidateId", ""))
-                    remote = stats.get(getattr(report, "remoteCandidateId", ""))
-                    types = {
-                        getattr(local, "candidateType", ""),
-                        getattr(remote, "candidateType", ""),
-                    }
-                    if types == {"host"}:
-                        mode = "lan"
-                    break
+            ice = self._pc.sctp.transport.transport  # sctp -> dtls -> ice transport
+            for pair in ice._connection._nominated.values():  # aioice internals
+                local, remote = pair.local_candidate, pair.remote_candidate
+                types = {getattr(local, "type", ""), getattr(remote, "type", "")}
+                hosts = (getattr(local, "host", ""), getattr(remote, "host", ""))
+                if types == {"host"} and not any(_tunnel_address(h) for h in hosts):
+                    mode = "lan"
+                break
         except Exception:
-            pass  # getStats is best-effort; defaulting to "wan" is the safe direction
+            pass  # best-effort; defaulting to "wan" is the safe direction
         self._link_mode = mode
         if self._send(protocol.link(mode)):
             self._log(f"link -> {mode}")
@@ -1225,6 +1226,24 @@ class RemoteTeleop:
         if self._log_cb is not None:
             with contextlib.suppress(Exception):
                 self._log_cb(message)
+
+
+def _tunnel_address(host: str) -> bool:
+    """True for addresses that mean a VPN/overlay carried the candidate even though its
+    ICE type is "host". A "lan" verdict over a tunnel hands the robot the tight watchdog
+    profile on a path with tunnel latency and a 1280-byte MTU — the exact pairing that
+    silently ate every fragmented frame on the 2026-08-26 bench (Tailscale: its CGNAT
+    IPv4 range and IPv6 ULA prefix). Not a general tunnel detector — it names the
+    overlay networks we have actually been bitten by."""
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv4Address):
+        return ip in ipaddress.ip_network("100.64.0.0/10")  # RFC 6598 CGNAT (Tailscale)
+    return ip in ipaddress.ip_network("fd7a:115c:a1e0::/48")  # Tailscale ULA
 
 
 def _put_drop_oldest(queue: asyncio.Queue[Any], value: Any) -> None:

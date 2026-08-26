@@ -358,3 +358,51 @@ async def test_snapshot_propagates_the_track_timeout():
     teleop, _channel = session()
     with pytest.raises(TeleopError, match="video track"):
         await teleop.snapshot(track_timeout=0.05)
+
+
+# --- link-mode detection (aioice nominated pairs; getStats has no candidate-pairs) --------
+
+
+def _fake_pc_with_pair(local_type, local_host, remote_type, remote_host):
+    from types import SimpleNamespace as NS
+
+    pair = NS(local_candidate=NS(type=local_type, host=local_host),
+              remote_candidate=NS(type=remote_type, host=remote_host))
+    ice = NS(_connection=NS(_nominated={1: pair}))
+    return NS(sctp=NS(transport=NS(transport=ice)))
+
+
+async def test_link_mode_lan_from_a_nominated_host_pair():
+    # aiortc implements NO candidate-pair stats, so the old getStats loop answered "wan"
+    # unconditionally — hardware-found on the 1.0 bench. The aioice walk must say "lan"
+    # for a genuine host/host pair on ordinary addresses.
+    teleop, channel = session()
+    teleop._pc = _fake_pc_with_pair("host", "192.168.68.72", "host", "192.168.68.89")
+    await teleop._detect_link_mode()
+    assert {"type": "link", "mode": "lan"} in channel.sent
+
+
+async def test_link_mode_wan_for_reflexive_pairs():
+    teleop, channel = session()
+    teleop._pc = _fake_pc_with_pair("srflx", "8.8.4.4", "host", "192.168.68.89")
+    await teleop._detect_link_mode()
+    assert {"type": "link", "mode": "wan"} in channel.sent
+
+
+async def test_link_mode_wan_for_host_pairs_on_a_tunnel():
+    # Tailscale candidates are ICE-type "host" but ride a 1280-MTU tunnel — calling that
+    # "lan" hands the robot the tight watchdog profile on the exact path that silently
+    # ate every fragmented frame on the 2026-08-26 bench.
+    teleop, channel = session()
+    teleop._pc = _fake_pc_with_pair("host", "100.93.106.93", "host", "100.112.189.107")
+    await teleop._detect_link_mode()
+    assert {"type": "link", "mode": "wan"} in channel.sent
+
+
+async def test_link_mode_degrades_to_wan_when_internals_change():
+    # The walk touches aiortc/aioice private attributes on purpose; an upgrade that
+    # breaks it must degrade to "wan", never raise or claim "lan".
+    teleop, channel = session()
+    teleop._pc = object()
+    await teleop._detect_link_mode()
+    assert {"type": "link", "mode": "wan"} in channel.sent

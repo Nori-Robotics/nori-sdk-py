@@ -336,10 +336,12 @@ through this SDK end-to-end:
 
 Not yet verified against hardware — expect to check these first:
 
-- The **link-mode handshake**: it was dead code until 2026-08-25 (the robot-opened channel
-  arrives already open, so the `open` handler never fired). The fix is unit-tested; a live
-  LAN session has not yet confirmed the robot adopts the tighter watchdog profile, and
-  aiortc's `getStats` shape (which the LAN/WAN detection reads) differs from the browser's.
+- The **LAN verdict of link-mode detection**: the handshake delivery itself is
+  bench-verified (2026-08-26 — the robot received and applied the mode), but the "lan"
+  classification was rewritten the same day (aiortc implements no candidate-pair stats,
+  so the old getStats loop answered "wan" unconditionally; detection now reads aioice's
+  nominated pairs and refuses to call a VPN/tunnel path "lan"). Unit-tested against fakes;
+  a live LAN session has not yet confirmed the robot adopts the tighter watchdog profile.
 - `estop_confirmed()`, `frames(track_timeout=)` and the stream shutdown wake-up (all
   2026-08-25) are unit-tested against the mock, not yet exercised on hardware.
 
