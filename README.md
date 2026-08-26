@@ -8,9 +8,10 @@ It exists for the clients a browser SDK can't serve: headless scripts, policy an
 drivers, dataset tooling, CI that drives a robot (or a mock) without a browser.
 
 > **Status: v1.0.0.** The pure layers (protocol, types, motion helpers, mock) are complete,
-> tested and spec-conformant, and `RemoteTeleop` has driven real hardware — bench A3 sessions
-> (2026-08-21/22) shook out the WebRTC interop path and two watchdog bugs. See
-> [Status](#status) for exactly what is and isn't hardware-verified.
+> tested and spec-conformant. `RemoteTeleop` has driven real hardware: bench sessions on an
+> A3 verified the WebRTC interop path, the base sign convention, pose, link-mode, and the
+> estop confirmation behavior. See [Status](#status) for exactly what is and isn't
+> hardware-verified.
 
 ## Install
 
@@ -317,33 +318,34 @@ Verified against the spec:
   and the L2-shaped frames (bridge-injected telemetry fields, `<session>/episode-NNNN`)
 - `pose()` / `control_pose()` validate against the spec's `control.pose` fixtures; the
   robot side (A3 gateway) is bench-verified through the full lifecycle including the
-  observed-motion failure guards — but this SDK's pose path has NOT yet run end-to-end
-  over a live WebRTC session (see `nori_ws` docs/runbooks/pose-targets-sdk-hardware-test.md)
+  observed-motion failure guards, and this SDK's pose path ran end-to-end over a live
+  WebRTC session on 2026-08-26 (modelled terminal round-trip)
 - Descriptor-driven motion helpers
 - `MockRobot` — pinned against the real gateway's frame order and record lifecycle
 - `LoopbackSignaling` — in-process transport pair for handshake tests
 - `UserAuth` / `DeviceAuth` — Supabase token providers with refresh, skew clamping and backoff
 
-Hardware-verified — live bench A3 sessions (NORI-A3-0000, 2026-08-21/22) drove the robot
-through this SDK end-to-end:
+Hardware-verified — live bench sessions on A3 hardware drove the robot through this SDK
+end-to-end:
 
 - `RemoteTeleop`'s WebRTC path: offer/answer against GStreamer's webrtcbin (the RSA-cipher,
-  H.264-fmtp and ICE-trickle interop fixes in `webrtc_compat` are each hardware-confirmed),
-  the control channel, and live jog/action driving. The watchdog keep-alives inside
-  `action(wait=True)` and `pose(wait=True)` exist *because* those sessions found their
-  absence — both were hardware-found bugs, now fixed and pinned.
-- `SupabaseSignaling` against the live Realtime service, in the same sessions.
+  H.264-fmtp and ICE-trickle interop shims in `webrtc_compat` are each hardware-confirmed),
+  the control channel, and live jog/action driving — including the watchdog keep-alives
+  inside `action(wait=True)` and `pose(wait=True)`.
+- `SupabaseSignaling` against the live Realtime service.
+- **Link-mode `lan` end-to-end**: detection reads aioice's nominated pairs (aiortc
+  implements no candidate-pair stats), deliberately refuses to call a VPN/tunnel path
+  "lan", and the robot verifiably adopted the tight watchdog profile.
+- **`estop_confirmed()` in both directions**: fast confirmation on a healthy channel, and
+  an honest "assume NOT stopped" raise when the robot latched but the report could not
+  make it back.
+- **`pose()` over live WebRTC**: full round trip to a modelled terminal verdict.
+- **The base sign convention**: +angular turns the robot left.
 
-Not yet verified against hardware — expect to check these first:
+Not yet verified against hardware:
 
-- The **LAN verdict of link-mode detection**: the handshake delivery itself is
-  bench-verified (2026-08-26 — the robot received and applied the mode), but the "lan"
-  classification was rewritten the same day (aiortc implements no candidate-pair stats,
-  so the old getStats loop answered "wan" unconditionally; detection now reads aioice's
-  nominated pairs and refuses to call a VPN/tunnel path "lan"). Unit-tested against fakes;
-  a live LAN session has not yet confirmed the robot adopts the tighter watchdog profile.
-- `estop_confirmed()`, `frames(track_timeout=)` and the stream shutdown wake-up (all
-  2026-08-25) are unit-tested against the mock, not yet exercised on hardware.
+- `frames(track_timeout=)` and the stream shutdown wake-up are unit-tested against the
+  mock only.
 
 Not built yet:
 

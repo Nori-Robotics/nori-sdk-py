@@ -46,6 +46,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/Nori-Robotics/nori-sdk-py"
+Changelog = "https://github.com/Nori-Robotics/nori-sdk-py/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nori_sdk"]

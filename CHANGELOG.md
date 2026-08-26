@@ -15,12 +15,12 @@ this build's `NORI_PROTOCOL_VERSION`, which is what an SDK build actually speaks
 TypeScript SDK never had the option, for the same reason. Removed *before* the 1.0 API
 freeze; if a real override need appears, a working kwarg can return compatibly in a minor.
 
-### `estop()` now RAISES on a dead channel — a deliberate contract change
+### `estop()` now raises on a dead channel — a deliberate contract change
 
 Previously `estop()` returned `None` whether or not the frame flew, like every other verb.
 That is right for ordinary verbs (the watchdog makes a dropped frame meaningless) and wrong
-for the one frame whose silent loss a caller must not mistake for success. `estop()` now
-raises `TeleopError` in EVERY mode — not just strict — when the control channel is not open,
+for an E-stop — a caller should never mistake a silently dropped stop for a delivered one.
+`estop()` now raises `TeleopError` in every mode — not just strict — when the channel is not open,
 so the caller knows to reach for the physical button. **Migration:** a bare
 `finally: robot.estop()` cleanup should become `try: robot.estop() except TeleopError: ...`
 (or log-and-continue), or the raise will mask the original exception.
@@ -30,7 +30,7 @@ so the caller knows to reach for the physical button. **Migration:** a bare
 New awaitable: sends the estop, then awaits the robot *reporting* the latch in telemetry.
 Only a report observed after the send counts — the cached merged frame is deliberately not
 consulted, since the safety block is carried forward and a stale "latched" would confirm an
-estop that went nowhere. Raises when no latch is seen; the only safe reading is "NOT stopped".
+estop that went nowhere. Raises when no latch is seen; the only safe reading is "not stopped".
 
 ### Base sign convention pinned against the spec fixture
 
@@ -43,7 +43,7 @@ convention can never drift silently again.
 ### Link-mode LAN detection actually works now (2026-08-26 bench findings)
 
 aiortc implements no candidate-pair stats, so the getStats-based LAN detection matched
-nothing and reported "wan" unconditionally — found on the 1.0 bench. Detection now reads
+nothing and reported "wan" unconditionally — found while bench-testing this release. Detection now reads
 aioice's nominated pairs directly (private-attribute walk that degrades to "wan" if an
 aiortc upgrade changes it), and deliberately refuses to call a VPN/overlay path "lan"
 even when its candidates are ICE-type host: a tunnel's 1280-byte MTU with the tight
@@ -75,14 +75,19 @@ robot lacks refuses `blocked/"empty_pose"`; default capabilities now match a hea
 gateway (`task_jog`, `pose_targets`, `record`), so `pose()` works against a plain
 `mock_session()` exactly as it does on hardware.
 
-### Documentation is no longer self-defeating
+### Protocol: `control.pose` and `action_id` are finalized
+
+Both graduated from PROPOSED in nori-protocol v1 alongside this release (older changelog
+entries below describe them as proposed — that was true at their date).
+
+### The doc examples now work
 
 The module headline example commanded `{"base": {"x": ...}}` — the telemetry-namespace
 spelling a robot reads as an explicit stop — and the `JogBuilder` docstring showed
 `.base(x=1.0)`, which raises. Both now use `linear`, as do the tests that pinned the old
 spelling.
 
-## Unreleased — 2026-08-23
+## Pre-release — 2026-08-23
 
 ### `pose(wait=True)` no longer starves the watchdog; `goto_pose` is now an alias
 
@@ -112,7 +117,7 @@ instead of a silent 10 s no-op (the payload would be ignored on the wire); a leg
 no capabilities field is allowed through, per the probe-or-assume-legacy contract. New
 builder `protocol.control_pose()` + `protocol.POSE_FRAME`; additive, no version bump.
 
-## Unreleased — 2026-08-23
+## Pre-release — 2026-08-23
 
 ### The unwired verbs are wired
 
@@ -165,7 +170,7 @@ wrong by that unit's calibration offset and wrong **silently**.
   mixing radians and normalized units is worse than a smaller one, because nothing downstream
   can tell which key is in which unit.
 
-## Unreleased — 2026-08-20
+## Pre-release — 2026-08-20
 
 ### Calibrated jog rates — `descriptor.jog_scale`
 
@@ -365,7 +370,7 @@ mutation that reverts it and fails exactly one named test; nine mutations were r
   something. A nightly cron catches spec changes landing in Nori-Protocol without a commit
   here. **Requires a `NORI_PROTOCOL_TOKEN` secret** with read access to the private spec repo.
 
-## Unreleased — 2026-08-13
+## Pre-release — 2026-08-13
 
 ### Conformance against the spec (new)
 
@@ -390,8 +395,8 @@ keep — it is what catches "we invented a field name".
 
 ### Auth — clock-skew and credential fixes
 
-Ported from `nori_identity/device_auth.py`; the two modules are deliberate twins and must not
-drift. Full rationale in `nori_ws/docs/known_issues.md` entry 18.
+Ported from the robot's own device-auth implementation; the two are deliberate twins and
+must not drift.
 
 - The refresh deadline runs on `time.monotonic()`, so no NTP step can move it.
 - The cache hold is bounded on both sides: a `_MIN_CACHE_S` **floor** (bounds the grant rate)
