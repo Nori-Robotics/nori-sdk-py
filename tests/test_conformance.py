@@ -33,9 +33,13 @@ from nori_sdk.types import (
     ActionStatus,
     CameraLayout,
     DaemonStatus,
+    ImuSample,
+    LidarScan,
+    NavigationStatus,
     PolicyStreamStatus,
     RobotError,
     RobotInfo,
+    SensorStreamStatus,
 )
 
 jsonschema = pytest.importorskip("jsonschema")
@@ -58,6 +62,10 @@ INBOUND_TYPES = {
     "daemon_status",
     "record_status",
     "policy_stream_status",
+    "navigation_status",
+    "sensor_stream_status",
+    "lidar_scan",
+    "imu",
 }
 
 
@@ -175,6 +183,51 @@ def test_call_validates():
 
 def test_policy_stream_validates():
     assert_valid(protocol.policy_stream("start", dest="laptop"))
+
+
+def test_navigation_verbs_validate():
+    request_id = "2776adbf-44d1-4887-bcf0-a175ae186d1b"
+    goal_id = "90b234d9-9582-4d5b-9792-7f81080a4dcb"
+    assert_valid(protocol.navigation("list_waypoints", request_id))
+    assert_valid(protocol.navigation(
+        "remember_waypoint", request_id, name="Dock"))
+    assert_valid(protocol.navigation(
+        "delete_waypoint", request_id, name="Dock"))
+    assert_valid(protocol.navigation(
+        "start", request_id, name="Dock", goal_id=goal_id))
+    assert_valid(protocol.navigation("cancel", request_id, goal_id=goal_id))
+    assert_valid(protocol.navigation("status", request_id))
+
+
+def test_sensor_stream_verbs_validate():
+    request_id = "f4283fa1-5a3b-4295-99d5-3f6baf87b04d"
+    assert_valid(protocol.sensor_stream("status", request_id))
+    assert_valid(protocol.sensor_stream(
+        "configure", request_id, lidar_hz=5, imu_hz=20,
+        lidar_max_points=360,
+    ))
+
+
+@pytest.mark.parametrize(
+    "message_type,model",
+    [
+        ("sensor_stream_status", SensorStreamStatus),
+        ("lidar_scan", LidarScan),
+        ("imu", ImuSample),
+    ],
+)
+def test_sensor_models_cover_every_schema_field(message_type, model):
+    schema = load_schema(message_type)
+    modelled = set(model.__dataclass_fields__) | {"type", "raw"}
+    missing = set(schema["properties"]) - modelled
+    assert not missing, f"unmodelled {message_type} fields: {sorted(missing)}"
+
+
+def test_navigation_status_models_every_schema_field():
+    schema = load_schema("navigation_status")
+    modelled = set(NavigationStatus.__dataclass_fields__) | {"type", "raw"}
+    missing = set(schema["properties"]) - modelled
+    assert not missing, f"unmodelled navigation_status fields: {sorted(missing)}"
 
 
 def test_arm_jog_validates():

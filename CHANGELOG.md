@@ -3,6 +3,23 @@
 Newest first. This package targets **nori-protocol v1** — see the Status section of
 `README.md` for what is and isn't hardware-verified.
 
+## Unreleased
+
+### Opt-in LiDAR and IMU streams
+
+`RemoteTeleop` can configure bounded `/scan` and `/imu/data` delivery on robots advertising
+`sensor_streams`, subscribe through `stream("lidar_scan")` / `stream("imu")`, and read the
+latest typed snapshots. Correlated status replies expose effective rates and current publisher
+presence. Both streams are off by default; LiDAR is capped at 10 Hz and 1,440 points, IMU at
+50 Hz. The mock implements deterministic sensor feeds through the same contract.
+
+### Named waypoint navigation
+
+`RemoteTeleop` can list, remember, delete, start, observe, await, and cancel map-bound named
+destinations on robots advertising `named_navigation`. Requests use UUID correlation and
+same-ID retries; asynchronous `NavigationStatus` snapshots expose Nav2 progress and terminal
+results. The hardware-free mock implements the same lifecycle and idempotency contract.
+
 ## 1.0.1 — 2026-08-26
 
 ### `JogBuilder.arm()` accepts task-space verbs in strict mode

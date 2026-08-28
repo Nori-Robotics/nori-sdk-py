@@ -26,10 +26,12 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nori_sdk"
 EXPECTED_TOP_LEVEL = {
     # protocol version + constant sets
     "NORI_PROTOCOL_VERSION", "RECOVERY_ERROR_CODES", "TERMINAL_ACTION_STATES",
+    "TERMINAL_NAVIGATION_STATES",
     # wire types
     "ActionStatus", "CameraLayout", "ConnectStatus", "DaemonStatus", "Perception",
-    "PolicyStreamStatus", "RecordState", "RobotDescriptor", "RobotError", "RobotInfo",
-    "Telemetry", "WatchdogProfile",
+    "NavigationStatus", "PolicyStreamStatus", "RecordState", "RobotDescriptor",
+    "RobotError", "RobotInfo", "Telemetry", "WatchdogProfile", "WaypointSummary",
+    "ImuSample", "LidarScan", "RosStamp", "SensorStreamStatus",
     # session
     "RemoteTeleop", "TeleopError",
     # signaling

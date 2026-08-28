@@ -37,6 +37,7 @@ import asyncio
 import contextlib
 import importlib.util
 import logging
+import math
 import time
 import uuid
 from collections import OrderedDict
@@ -58,11 +59,16 @@ from .types import (
     CameraLayout,
     ConnectStatus,
     DaemonStatus,
+    ImuSample,
+    LidarScan,
+    NavigationStatus,
     Perception,
     PolicyStreamStatus,
     RecordState,
     RobotInfo,
+    SensorStreamStatus,
     Telemetry,
+    TERMINAL_NAVIGATION_STATES,
 )
 from .version import NORI_PROTOCOL_VERSION
 
@@ -126,6 +132,10 @@ class RemoteTeleop:
         self._perception_at: float = 0.0        # monotonic; staleness is the useful reading
         self._policy: PolicyStreamStatus | None = None
         self._record_state: RecordState | None = None
+        self._navigation_status: NavigationStatus | None = None
+        self._sensor_stream_status: SensorStreamStatus | None = None
+        self._lidar_scan: LidarScan | None = None
+        self._imu_sample: ImuSample | None = None
         # Last status per action_id, so a fire-and-forget caller can poll instead of awaiting.
         # BOUNDED: a policy issuing thousands of actions must not grow this without limit, and
         # nothing needs the history -- only the most recent verdict per id.
@@ -147,6 +157,15 @@ class RemoteTeleop:
         self._pending_actions: dict[str, asyncio.Future[ActionStatus]] = {}
         self._record_waiters: list[asyncio.Future[RecordState]] = []
         self._policy_waiters: list[asyncio.Future[PolicyStreamStatus]] = []
+        self._navigation_waiters: dict[
+            str, asyncio.Future[NavigationStatus]
+        ] = {}
+        self._navigation_goal_waiters: dict[
+            str, asyncio.Future[NavigationStatus]
+        ] = {}
+        self._sensor_stream_waiters: dict[
+            str, asyncio.Future[SensorStreamStatus]
+        ] = {}
         self._stream_queues: set[asyncio.Queue[Any]] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._jog_payload: dict[str, Any] | None = None
@@ -199,6 +218,33 @@ class RemoteTeleop:
         # lands even in a full queue a slow consumer may never drain.
         for queue in list(self._stream_queues):
             _put_drop_oldest(queue, _STREAM_CLOSED)
+        for request_id, future in list(self._navigation_waiters.items()):
+            if not future.done():
+                future.set_result(NavigationStatus(
+                    state="unavailable",
+                    request_id=request_id,
+                    error="navigation session closed",
+                ))
+        self._navigation_waiters.clear()
+        for goal_id, future in list(self._navigation_goal_waiters.items()):
+            if not future.done():
+                future.set_result(NavigationStatus(
+                    state="failed",
+                    goal_id=goal_id,
+                    error="navigation session closed",
+                ))
+        self._navigation_goal_waiters.clear()
+        self._navigation_status = None
+        for request_id, future in list(self._sensor_stream_waiters.items()):
+            if not future.done():
+                future.set_result(SensorStreamStatus(
+                    request_id=request_id,
+                    error="sensor stream session closed",
+                ))
+        self._sensor_stream_waiters.clear()
+        self._sensor_stream_status = None
+        self._lidar_scan = None
+        self._imu_sample = None
         with contextlib.suppress(Exception):
             self._signaling.send_bye()
         with contextlib.suppress(Exception):
@@ -322,6 +368,26 @@ class RemoteTeleop:
         Every reply carries the WHOLE recording state rather than a delta, so this is a
         complete snapshot and a client that missed one frame is not left inconsistent."""
         return self._record_state
+
+    @property
+    def navigation_status(self) -> NavigationStatus | None:
+        """Latest named-navigation reply or unsolicited lifecycle snapshot."""
+        return self._navigation_status
+
+    @property
+    def sensor_stream_status(self) -> SensorStreamStatus | None:
+        """Latest effective sensor stream settings and publisher presence."""
+        return self._sensor_stream_status
+
+    @property
+    def lidar_scan(self) -> LidarScan | None:
+        """Latest delivered filtered LiDAR scan, or None before subscribing."""
+        return self._lidar_scan
+
+    @property
+    def imu_sample(self) -> ImuSample | None:
+        """Latest delivered IMU sample, or None before subscribing."""
+        return self._imu_sample
 
     def action_status(self, action_id: str) -> ActionStatus | None:
         """The latest verdict for one action_id, or None if none has arrived yet.
@@ -692,6 +758,253 @@ class RemoteTeleop:
         if not state.ok:
             raise TeleopError(f"record {action!r} refused: {state.error or 'no reason given'}")
         return state
+
+    async def _navigation_request(
+        self,
+        action: protocol.NavigationAction,
+        *,
+        name: str = "",
+        goal_id: str = "",
+        timeout: float = 5.0,
+    ) -> NavigationStatus:
+        if self._info is not None and self._info.supports("named_navigation") is False:
+            raise TeleopError(
+                "this robot does not advertise the named_navigation capability"
+            )
+        request_id = str(uuid.uuid4())
+        future: asyncio.Future[NavigationStatus] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._navigation_waiters[request_id] = future
+        frame = protocol.navigation(
+            action,
+            request_id,
+            name=name,
+            goal_id=goal_id,
+        )
+        sent = self._send(frame)
+        if not sent:
+            self._navigation_waiters.pop(request_id, None)
+            return NavigationStatus(
+                state="unavailable",
+                request_id=request_id,
+                goal_id=goal_id or None,
+                name=name or None,
+                error="navigation control channel is not open",
+            )
+        async def retry() -> None:
+            while not future.done():
+                await asyncio.sleep(0.75)
+                if not future.done():
+                    self._send(frame)
+
+        retry_task = asyncio.create_task(retry())
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            self._navigation_waiters.pop(request_id, None)
+            return NavigationStatus(
+                state="unavailable",
+                request_id=request_id,
+                goal_id=goal_id or None,
+                name=name or None,
+                error=f"navigation {action}: no reply in {timeout:.1f}s",
+            )
+        finally:
+            retry_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await retry_task
+
+    async def list_waypoints(self, timeout: float = 5.0) -> NavigationStatus:
+        """List named destinations bound to the robot's active saved map."""
+        return await self._navigation_request("list_waypoints", timeout=timeout)
+
+    async def remember_waypoint(
+        self, name: str, timeout: float = 5.0
+    ) -> NavigationStatus:
+        """Save the robot's current localized pose under ``name``."""
+        return await self._navigation_request(
+            "remember_waypoint", name=name, timeout=timeout
+        )
+
+    async def delete_waypoint(
+        self, name: str, timeout: float = 5.0
+    ) -> NavigationStatus:
+        """Delete ``name`` on the active map; refuses during navigation."""
+        return await self._navigation_request(
+            "delete_waypoint", name=name, timeout=timeout
+        )
+
+    async def navigate_to_waypoint(
+        self, name: str, timeout: float = 5.0
+    ) -> NavigationStatus:
+        """Start one map-matched Nav2 goal to a remembered destination."""
+        return await self._navigation_request(
+            "start",
+            name=name,
+            goal_id=str(uuid.uuid4()),
+            timeout=timeout,
+        )
+
+    async def cancel_navigation(
+        self, goal_id: str = "", timeout: float = 5.0
+    ) -> NavigationStatus:
+        """Cancel this SDK session's goal, optionally requiring ``goal_id``."""
+        return await self._navigation_request(
+            "cancel", goal_id=goal_id, timeout=timeout
+        )
+
+    async def get_navigation_status(
+        self, timeout: float = 5.0
+    ) -> NavigationStatus:
+        """Read the robot's latest global named-navigation snapshot."""
+        return await self._navigation_request("status", timeout=timeout)
+
+    async def await_navigation(
+        self, goal_id: str, timeout: float = 120.0
+    ) -> NavigationStatus:
+        """Wait for a terminal snapshot for ``goal_id`` without polling."""
+        current = self._navigation_status
+        if (
+            current is not None
+            and current.goal_id == goal_id
+            and current.state in TERMINAL_NAVIGATION_STATES
+        ):
+            return current
+        previous = self._navigation_goal_waiters.pop(goal_id, None)
+        if previous is not None and not previous.done():
+            previous.set_result(NavigationStatus(
+                state="failed",
+                goal_id=goal_id,
+                error="await_navigation replaced by a newer waiter for this goal",
+            ))
+        future: asyncio.Future[NavigationStatus] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._navigation_goal_waiters[goal_id] = future
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            self._navigation_goal_waiters.pop(goal_id, None)
+            return NavigationStatus(
+                state="failed",
+                goal_id=goal_id,
+                error=f"navigation goal did not finish in {timeout:.1f}s",
+            )
+
+    async def _sensor_stream_request(
+        self,
+        action: protocol.SensorStreamAction,
+        *,
+        lidar_hz: float | None = None,
+        imu_hz: float | None = None,
+        lidar_max_points: int | None = None,
+        timeout: float = 5.0,
+    ) -> SensorStreamStatus:
+        if self._info is not None and self._info.supports("sensor_streams") is False:
+            raise TeleopError(
+                "this robot does not advertise the sensor_streams capability"
+            )
+        def valid_rate(value: object, maximum: float) -> bool:
+            return (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and 0.0 <= float(value) <= maximum
+            )
+
+        if lidar_hz is not None and not valid_rate(lidar_hz, 10.0):
+            raise ValueError("lidar_hz must be between 0 and 10")
+        if imu_hz is not None and not valid_rate(imu_hz, 50.0):
+            raise ValueError("imu_hz must be between 0 and 50")
+        if lidar_max_points is not None and (
+            isinstance(lidar_max_points, bool)
+            or not isinstance(lidar_max_points, int)
+            or not 16 <= lidar_max_points <= 1440
+        ):
+            raise ValueError(
+                "lidar_max_points must be an integer between 16 and 1440"
+            )
+        if (
+            action == "configure"
+            and lidar_hz is None
+            and imu_hz is None
+            and lidar_max_points is None
+        ):
+            raise ValueError(
+                "configure_sensor_streams requires at least one setting"
+            )
+        request_id = str(uuid.uuid4())
+        frame = protocol.sensor_stream(
+            action,
+            request_id,
+            lidar_hz=lidar_hz,
+            imu_hz=imu_hz,
+            lidar_max_points=lidar_max_points,
+        )
+        future: asyncio.Future[SensorStreamStatus] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._sensor_stream_waiters[request_id] = future
+        if not self._send(frame):
+            self._sensor_stream_waiters.pop(request_id, None)
+            return SensorStreamStatus(
+                request_id=request_id,
+                error="sensor stream control channel is not open",
+            )
+
+        async def retry() -> None:
+            while not future.done():
+                await asyncio.sleep(0.75)
+                if not future.done():
+                    self._send(frame)
+
+        retry_task = asyncio.create_task(retry())
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            self._sensor_stream_waiters.pop(request_id, None)
+            current = self._sensor_stream_status
+            return SensorStreamStatus(
+                request_id=request_id,
+                lidar_hz=current.lidar_hz if current else 0.0,
+                imu_hz=current.imu_hz if current else 0.0,
+                lidar_max_points=current.lidar_max_points if current else 360,
+                lidar_available=current.lidar_available if current else False,
+                imu_available=current.imu_available if current else False,
+                error=f"sensor_stream {action}: no reply in {timeout:.1f}s",
+            )
+        finally:
+            retry_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await retry_task
+
+    async def configure_sensor_streams(
+        self,
+        *,
+        lidar_hz: float | None = None,
+        imu_hz: float | None = None,
+        lidar_max_points: int | None = None,
+        timeout: float = 5.0,
+    ) -> SensorStreamStatus:
+        """Configure opt-in sensor delivery; zero disables a stream.
+
+        Omitted settings retain their current robot-side values. The robot caps
+        LiDAR at 10 Hz, IMU at 50 Hz and LiDAR payloads at 1440 readings.
+        """
+        return await self._sensor_stream_request(
+            "configure",
+            lidar_hz=lidar_hz,
+            imu_hz=imu_hz,
+            lidar_max_points=lidar_max_points,
+            timeout=timeout,
+        )
+
+    async def get_sensor_stream_status(
+        self, timeout: float = 5.0
+    ) -> SensorStreamStatus:
+        """Read effective stream settings and current ROS publisher presence."""
+        return await self._sensor_stream_request("status", timeout=timeout)
 
     # --- outbound: policy stream / leader / call --------------------------------------------
 
@@ -1185,6 +1498,42 @@ class RemoteTeleop:
                 policy_future = self._policy_waiters.pop(0)
                 if not policy_future.done():
                     policy_future.set_result(parsed)
+        elif kind == "navigation_status" and isinstance(parsed, NavigationStatus):
+            if parsed.request_id:
+                request_future = self._navigation_waiters.pop(
+                    parsed.request_id, None
+                )
+                if request_future is not None and not request_future.done():
+                    request_future.set_result(parsed)
+            previous = self._navigation_status
+            stale_regression = bool(
+                previous is not None
+                and previous.goal_id
+                and previous.goal_id == parsed.goal_id
+                and previous.state in TERMINAL_NAVIGATION_STATES
+                and parsed.state not in TERMINAL_NAVIGATION_STATES
+            )
+            if not stale_regression:
+                self._navigation_status = parsed
+            if parsed.goal_id and parsed.state in TERMINAL_NAVIGATION_STATES:
+                goal_future = self._navigation_goal_waiters.pop(
+                    parsed.goal_id, None
+                )
+                if goal_future is not None and not goal_future.done():
+                    goal_future.set_result(parsed)
+            if stale_regression:
+                return
+        elif kind == "sensor_stream_status" and isinstance(
+            parsed, SensorStreamStatus
+        ):
+            self._sensor_stream_status = parsed
+            future = self._sensor_stream_waiters.pop(parsed.request_id, None)
+            if future is not None and not future.done():
+                future.set_result(parsed)
+        elif kind == "lidar_scan" and isinstance(parsed, LidarScan):
+            self._lidar_scan = parsed
+        elif kind == "imu" and isinstance(parsed, ImuSample):
+            self._imu_sample = parsed
         self._emit(kind, parsed if parsed is not None else obj)
 
     # --- internals -------------------------------------------------------------------------

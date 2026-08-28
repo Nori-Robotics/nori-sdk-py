@@ -99,6 +99,8 @@ async def mock_session(
         while True:
             await asyncio.sleep(interval)
             bot.step(interval)
+            for event in bot.drain_events():
+                teleop._handle_frame(event)
             teleop._handle_frame(bot.telemetry())
 
     task = asyncio.create_task(pump()) if telemetry_hz > 0 else None

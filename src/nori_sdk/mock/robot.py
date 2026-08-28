@@ -8,6 +8,7 @@ this exists to catch client regressions, not to define new semantics.
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -138,12 +139,16 @@ class MockRobot:
         # handle() checks this list before acting, so the double can never quietly serve a
         # verb it did not advertise. The default is what a healthy A3 gateway sends with
         # motion and the recorder up (nori_ws protocol.py on_channel_open: task_jog,
-        # pose_targets, record) -- the mock used to omit pose_targets on the claim that the
-        # gateway advertised nothing, which stopped being true and made pose() raise here
-        # while working on hardware. Trim the list to rehearse the capability gate:
+        # pose_targets, record, named_navigation) -- the mock used to omit
+        # pose_targets on the claim that the gateway advertised nothing,
+        # which stopped being true and made pose() raise here while working
+        # on hardware. Trim the list to rehearse the capability gate:
         #     MockRobot(capabilities=["task_jog", "record"])   # pose() refuses pre-flight
         self.capabilities = (
-            ["task_jog", "pose_targets", "record"]
+            [
+                "task_jog", "pose_targets", "record", "named_navigation",
+                "sensor_streams",
+            ]
             if capabilities is None
             else list(capabilities)
         )
@@ -180,6 +185,17 @@ class MockRobot:
         self._episode_counter = 0
         self._episodes_kept = 0
         self._open_episode = ""
+        self._navigation_waypoints: dict[str, dict[str, Any]] = {}
+        self._navigation_active: dict[str, Any] | None = None
+        self._navigation_cache: dict[str, dict[str, Any]] = {}
+        self._navigation_events: list[str] = []
+        self._navigation_map_sha = "a" * 64
+        self._sensor_lidar_hz = 0.0
+        self._sensor_imu_hz = 0.0
+        self._sensor_lidar_max_points = 360
+        self._sensor_last_lidar = -1.0
+        self._sensor_last_imu = -1.0
+        self._sensor_cache: dict[str, dict[str, Any]] = {}
 
     # --- outbound ---------------------------------------------------------------------------
 
@@ -211,6 +227,47 @@ class MockRobot:
         The clock is `dt` accumulated here, NOT wall time, so a test can advance two seconds
         instantly and deterministically."""
         self._elapsed += dt
+        if self._navigation_active is not None:
+            elapsed = self._elapsed - float(
+                self._navigation_active["started_at"]
+            )
+            remaining = max(0.0, 1.5 - elapsed)
+            frame = {
+                "type": "navigation_status",
+                "ok": True,
+                "state": "succeeded" if remaining == 0.0 else "navigating",
+                "active": remaining > 0.0,
+                "goal_id": self._navigation_active["goal_id"],
+                "name": self._navigation_active["name"],
+                "map_sha256": self._navigation_map_sha,
+                "distance_remaining_m": remaining * 0.4,
+                "estimated_time_remaining_s": remaining,
+                "number_of_recoveries": 0,
+            }
+            self._navigation_events.append(self._emit(frame))
+            if remaining == 0.0:
+                self._navigation_active = None
+
+        if (
+            self._sensor_lidar_hz > 0
+            and (
+                self._sensor_last_lidar < 0
+                or self._elapsed - self._sensor_last_lidar
+                >= 1.0 / self._sensor_lidar_hz
+            )
+        ):
+            self._sensor_last_lidar = self._elapsed
+            self._navigation_events.append(self._emit(self._mock_lidar()))
+        if (
+            self._sensor_imu_hz > 0
+            and (
+                self._sensor_last_imu < 0
+                or self._elapsed - self._sensor_last_imu
+                >= 1.0 / self._sensor_imu_hz
+            )
+        ):
+            self._sensor_last_imu = self._elapsed
+            self._navigation_events.append(self._emit(self._mock_imu()))
 
         # THE WATCHDOG. The single most important behaviour this double can teach, because it
         # is the one a script gets wrong in a way that works locally and fails on hardware:
@@ -534,7 +591,211 @@ class MockRobot:
             return [self._emit(self._record(message))]
         if kind == "policy_stream":
             return [self._emit(self._policy_stream(message))]
+        if kind == "navigation":
+            if "named_navigation" not in self.capabilities:
+                return []
+            return [self._emit(self._navigation(message))]
+        if kind == "sensor_stream":
+            if "sensor_streams" not in self.capabilities:
+                return []
+            return [self._emit(self._sensor_stream(message))]
         return []  # video/call are bridge-intercepted; no audio device in a double
+
+    def drain_events(self) -> list[str]:
+        """Unsolicited lifecycle frames produced by the last step()."""
+        events = self._navigation_events
+        self._navigation_events = []
+        return events
+
+    def _navigation(self, message: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(message.get("request_id", ""))
+        cached = self._navigation_cache.get(request_id)
+        if cached is not None:
+            return dict(cached)
+        base: dict[str, Any] = {
+            "type": "navigation_status",
+            "request_id": request_id,
+            "ok": True,
+            "state": "navigating" if self._navigation_active else "idle",
+            "active": self._navigation_active is not None,
+            "map_sha256": self._navigation_map_sha,
+        }
+        if self._navigation_active:
+            base.update(
+                goal_id=self._navigation_active["goal_id"],
+                name=self._navigation_active["name"],
+            )
+        action = message.get("action")
+        if action == "list_waypoints":
+            base["waypoints"] = [
+                {
+                    "name": waypoint["name"],
+                    "saved_at_unix": waypoint["saved_at_unix"],
+                }
+                for waypoint in sorted(
+                    self._navigation_waypoints.values(),
+                    key=lambda item: str(item["name"]).casefold(),
+                )
+            ]
+        elif action == "remember_waypoint":
+            name = " ".join(str(message.get("name", "")).split())
+            if not name or self._navigation_active:
+                base.update(
+                    ok=False,
+                    error=(
+                        "waypoint name must not be empty"
+                        if not name else "navigation is active"
+                    ),
+                )
+            else:
+                key = name.casefold()
+                replaced = key in self._navigation_waypoints
+                self._navigation_waypoints[key] = {
+                    "name": name,
+                    "saved_at_unix": self._elapsed,
+                }
+                base.update(name=name, replaced=replaced)
+        elif action == "delete_waypoint":
+            name = " ".join(str(message.get("name", "")).split())
+            deleted = (
+                not self._navigation_active
+                and self._navigation_waypoints.pop(name.casefold(), None)
+                is not None
+            )
+            base.update(ok=deleted, name=name, deleted=deleted)
+            if not deleted:
+                base["error"] = (
+                    "navigation is active"
+                    if self._navigation_active else "waypoint not found"
+                )
+        elif action == "start":
+            name = " ".join(str(message.get("name", "")).split())
+            goal_id = str(message.get("goal_id", ""))
+            waypoint = self._navigation_waypoints.get(name.casefold())
+            if waypoint is None or self._navigation_active or not goal_id:
+                base.update(
+                    ok=False,
+                    error=(
+                        "waypoint not found" if waypoint is None
+                        else "navigation is active" if self._navigation_active
+                        else "goal_id missing"
+                    ),
+                )
+            else:
+                self._navigation_active = {
+                    "goal_id": goal_id,
+                    "name": waypoint["name"],
+                    "started_at": self._elapsed,
+                }
+                base.update(
+                    state="navigating",
+                    active=True,
+                    goal_id=goal_id,
+                    name=waypoint["name"],
+                )
+        elif action == "cancel":
+            goal_id = str(message.get("goal_id", ""))
+            active = self._navigation_active
+            if active and (not goal_id or goal_id == active["goal_id"]):
+                base.update(
+                    state="canceled",
+                    active=False,
+                    goal_id=active["goal_id"],
+                    name=active["name"],
+                )
+                self._navigation_active = None
+            else:
+                base.update(ok=False, error="navigation goal_id does not match")
+        elif action != "status":
+            base.update(ok=False, error=f"unknown navigation action {action!r}")
+        self._navigation_cache[request_id] = dict(base)
+        return base
+
+    def _sensor_status(
+        self, request_id: str, *, ok: bool = True, error: str = ""
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "type": "sensor_stream_status",
+            "request_id": request_id,
+            "ok": ok,
+            "lidar_hz": self._sensor_lidar_hz,
+            "imu_hz": self._sensor_imu_hz,
+            "lidar_max_points": self._sensor_lidar_max_points,
+            "lidar_available": True,
+            "imu_available": True,
+        }
+        if error:
+            result["error"] = error
+        return result
+
+    def _sensor_stream(self, message: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(message.get("request_id", ""))
+        cached = self._sensor_cache.get(request_id)
+        if cached is not None:
+            return dict(cached)
+        action = message.get("action")
+        if action == "configure":
+            if "lidar_hz" in message:
+                self._sensor_lidar_hz = float(message["lidar_hz"])
+            if "imu_hz" in message:
+                self._sensor_imu_hz = float(message["imu_hz"])
+            if "lidar_max_points" in message:
+                self._sensor_lidar_max_points = int(
+                    message["lidar_max_points"]
+                )
+            result = self._sensor_status(request_id)
+        elif action == "status":
+            result = self._sensor_status(request_id)
+        else:
+            result = self._sensor_status(
+                request_id,
+                ok=False,
+                error=f"unknown sensor stream action {action!r}",
+            )
+        self._sensor_cache[request_id] = dict(result)
+        return result
+
+    def _mock_stamp(self) -> dict[str, int]:
+        sec = int(self._elapsed)
+        return {
+            "sec": sec,
+            "nanosec": int((self._elapsed - sec) * 1_000_000_000),
+        }
+
+    def _mock_lidar(self) -> dict[str, Any]:
+        points = min(360, self._sensor_lidar_max_points)
+        increment = 2.0 * math.pi / max(1, points)
+        return {
+            "type": "lidar_scan",
+            "stamp": self._mock_stamp(),
+            "frame_id": "laser",
+            "angle_min_rad": -math.pi,
+            "angle_max_rad": -math.pi + increment * max(0, points - 1),
+            "angle_increment_rad": increment,
+            "time_increment_s": 0.1 / max(1, points),
+            "scan_time_s": 0.1,
+            "range_min_m": 0.05,
+            "range_max_m": 12.0,
+            "source_points": 360,
+            "ranges_m": [
+                round(2.0 + 0.25 * math.sin(index * increment), 4)
+                for index in range(points)
+            ],
+            "intensities": [10.0] * points,
+        }
+
+    def _mock_imu(self) -> dict[str, Any]:
+        return {
+            "type": "imu",
+            "stamp": self._mock_stamp(),
+            "frame_id": "imu_link",
+            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+            "orientation_covariance": [0.01] * 9,
+            "angular_velocity_rad_s": [0.0, 0.0, 0.0],
+            "angular_velocity_covariance": [0.01] * 9,
+            "linear_acceleration_m_s2": [0.0, 0.0, 9.81],
+            "linear_acceleration_covariance": [0.04] * 9,
+        }
 
     def _action_lifecycle(self) -> list[str]:
         """The action_status states this robot would emit, in order.

@@ -23,11 +23,15 @@ from .types import (
     ActionStatus,
     CameraLayout,
     DaemonStatus,
+    ImuSample,
+    LidarScan,
+    NavigationStatus,
     Perception,
     PolicyStreamStatus,
     RecordState,
     RobotError,
     RobotInfo,
+    SensorStreamStatus,
     Telemetry,
 )
 
@@ -41,6 +45,10 @@ INBOUND_KINDS = frozenset(
         "action_status",
         "record_status",
         "policy_stream_status",
+        "navigation_status",
+        "sensor_stream_status",
+        "lidar_scan",
+        "imu",
         "perception",
         "error",
     }
@@ -48,7 +56,10 @@ INBOUND_KINDS = frozenset(
 
 # Frames we may send. The robot ignores what it doesn't know, and so must we.
 OUTBOUND_KINDS = frozenset(
-    {"control", "command", "video", "link", "record", "policy_stream", "call"}
+    {
+        "control", "command", "video", "link", "record", "policy_stream",
+        "call", "navigation", "sensor_stream",
+    }
 )
 
 # A `jog` payload: normalized rates in [-1, 1] per DOF. The robot scales by its own per-tick
@@ -107,6 +118,15 @@ RecordVerb = Literal[
 DESTRUCTIVE_RECORD_VERBS = frozenset({"episode_discard", "session_discard", "discard_last"})
 
 CommandName = Literal["estop", "reset_latch"]
+NavigationAction = Literal[
+    "list_waypoints",
+    "remember_waypoint",
+    "delete_waypoint",
+    "start",
+    "cancel",
+    "status",
+]
+SensorStreamAction = Literal["configure", "status"]
 
 
 # --- outbound builders ---------------------------------------------------------------------
@@ -251,6 +271,54 @@ def call(
     return frame
 
 
+def navigation(
+    action: NavigationAction,
+    request_id: str,
+    *,
+    name: str = "",
+    goal_id: str = "",
+) -> dict[str, Any]:
+    """Build one correlated named-waypoint operation.
+
+    request_id is the robot-side idempotency key; retrying this exact frame
+    cannot start a duplicate goal. start additionally carries a stable goal_id
+    used by feedback, completion and cancellation.
+    """
+    frame: dict[str, Any] = {
+        "type": "navigation",
+        "request_id": request_id,
+        "action": action,
+    }
+    if name:
+        frame["name"] = name
+    if goal_id:
+        frame["goal_id"] = goal_id
+    return frame
+
+
+def sensor_stream(
+    action: SensorStreamAction,
+    request_id: str,
+    *,
+    lidar_hz: float | None = None,
+    imu_hz: float | None = None,
+    lidar_max_points: int | None = None,
+) -> dict[str, Any]:
+    """Build one correlated opt-in LiDAR/IMU stream request."""
+    frame: dict[str, Any] = {
+        "type": "sensor_stream",
+        "request_id": request_id,
+        "action": action,
+    }
+    if lidar_hz is not None:
+        frame["lidar_hz"] = lidar_hz
+    if imu_hz is not None:
+        frame["imu_hz"] = imu_hz
+    if lidar_max_points is not None:
+        frame["lidar_max_points"] = lidar_max_points
+    return frame
+
+
 def encode(frame: dict[str, Any]) -> str:
     """Serialize one outbound frame. Compact separators because the control channel is
     per-message and we send it at 20 Hz."""
@@ -267,6 +335,10 @@ Inbound = (
     | ActionStatus
     | RecordState
     | PolicyStreamStatus
+    | NavigationStatus
+    | SensorStreamStatus
+    | LidarScan
+    | ImuSample
     | Perception
     | RobotError
 )
@@ -305,6 +377,14 @@ def decode(raw: str | bytes) -> tuple[str, Inbound | None, dict[str, Any]]:
         parsed = RecordState.from_wire(obj)
     elif kind == "policy_stream_status":
         parsed = PolicyStreamStatus.from_wire(obj)
+    elif kind == "navigation_status":
+        parsed = NavigationStatus.from_wire(obj)
+    elif kind == "sensor_stream_status":
+        parsed = SensorStreamStatus.from_wire(obj)
+    elif kind == "lidar_scan":
+        parsed = LidarScan.from_wire(obj)
+    elif kind == "imu":
+        parsed = ImuSample.from_wire(obj)
     elif kind == "perception":
         parsed = Perception.from_wire(obj)
     elif kind == "error":
@@ -323,6 +403,8 @@ __all__ = [
     "CommandName",
     "Inbound",
     "Jog",
+    "NavigationAction",
+    "SensorStreamAction",
     "RecordVerb",
     "call",
     "command",
@@ -334,6 +416,8 @@ __all__ = [
     "decode",
     "encode",
     "link",
+    "navigation",
+    "sensor_stream",
     "policy_stream",
     "record",
     "video_bitrate",

@@ -29,6 +29,7 @@ manufacture a state the robot never reported.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -587,6 +588,254 @@ class PolicyStreamStatus:
         )
 
 
+NavigationState = Literal[
+    "idle",
+    "starting",
+    "navigating",
+    "canceling",
+    "succeeded",
+    "canceled",
+    "aborted",
+    "failed",
+    "unavailable",
+]
+TERMINAL_NAVIGATION_STATES = frozenset(
+    {"succeeded", "canceled", "aborted", "failed", "unavailable"}
+)
+
+
+@dataclass(frozen=True)
+class WaypointSummary:
+    """One named pose available on the robot's active saved map."""
+
+    name: str
+    saved_at_unix: float
+
+
+@dataclass(frozen=True)
+class NavigationStatus:
+    """Correlated named-navigation reply or unsolicited lifecycle snapshot."""
+
+    ok: bool = False
+    state: NavigationState = "unavailable"
+    active: bool = False
+    request_id: str | None = None
+    goal_id: str | None = None
+    name: str | None = None
+    map_sha256: str | None = None
+    distance_remaining_m: float | None = None
+    estimated_time_remaining_s: float | None = None
+    number_of_recoveries: int | None = None
+    error_code: int | None = None
+    error: str | None = None
+    replaced: bool | None = None
+    deleted: bool | None = None
+    waypoints: tuple[WaypointSummary, ...] = ()
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> NavigationStatus:
+        raw_state = _s(obj, "state") or "unavailable"
+        states = {
+            "idle", "starting", "navigating", "canceling", "succeeded",
+            "canceled", "aborted", "failed", "unavailable",
+        }
+        state = raw_state if raw_state in states else "failed"
+        raw_waypoints = obj.get("waypoints")
+        waypoints = tuple(
+            WaypointSummary(
+                name=str(item["name"]),
+                saved_at_unix=float(item["saved_at_unix"]),
+            )
+            for item in raw_waypoints
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and isinstance(item.get("saved_at_unix"), (int, float))
+            and not isinstance(item.get("saved_at_unix"), bool)
+        ) if isinstance(raw_waypoints, list) else ()
+        return cls(
+            ok=obj.get("ok") is True,
+            state=state,  # type: ignore[arg-type]
+            active=obj.get("active") is True,
+            request_id=_s(obj, "request_id"),
+            goal_id=_s(obj, "goal_id"),
+            name=_s(obj, "name"),
+            map_sha256=_s(obj, "map_sha256"),
+            distance_remaining_m=_f(obj, "distance_remaining_m"),
+            estimated_time_remaining_s=_f(
+                obj, "estimated_time_remaining_s"
+            ),
+            number_of_recoveries=(
+                _i(obj, "number_of_recoveries")
+                if isinstance(obj.get("number_of_recoveries"), int)
+                and not isinstance(obj.get("number_of_recoveries"), bool)
+                else None
+            ),
+            error_code=(
+                _i(obj, "error_code")
+                if isinstance(obj.get("error_code"), int)
+                and not isinstance(obj.get("error_code"), bool)
+                else None
+            ),
+            error=_s(obj, "error"),
+            replaced=(
+                bool(obj["replaced"]) if isinstance(obj.get("replaced"), bool)
+                else None
+            ),
+            deleted=(
+                bool(obj["deleted"]) if isinstance(obj.get("deleted"), bool)
+                else None
+            ),
+            waypoints=waypoints,
+            raw=dict(obj),
+        )
+
+
+@dataclass(frozen=True)
+class RosStamp:
+    """A ROS 2 timestamp kept split so nanoseconds stay exact in every SDK."""
+
+    sec: int = 0
+    nanosec: int = 0
+
+    @classmethod
+    def from_wire(cls, obj: Any) -> RosStamp:
+        if not isinstance(obj, dict):
+            return cls()
+        return cls(sec=_i(obj, "sec"), nanosec=_i(obj, "nanosec"))
+
+
+def _nullable_numbers(obj: dict[str, Any], key: str) -> tuple[float | None, ...]:
+    values = obj.get(key)
+    if not isinstance(values, list):
+        return ()
+    def nullable(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        try:
+            number = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    return tuple(nullable(value) for value in values)
+
+
+@dataclass(frozen=True)
+class SensorStreamStatus:
+    """Effective rates and current publisher presence for remote sensor streams."""
+
+    ok: bool = False
+    request_id: str = ""
+    lidar_hz: float = 0.0
+    imu_hz: float = 0.0
+    lidar_max_points: int = 360
+    lidar_available: bool = False
+    imu_available: bool = False
+    error: str | None = None
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> SensorStreamStatus:
+        points = obj.get("lidar_max_points")
+        return cls(
+            ok=obj.get("ok") is True,
+            request_id=_s(obj, "request_id") or "",
+            lidar_hz=_f(obj, "lidar_hz") or 0.0,
+            imu_hz=_f(obj, "imu_hz") or 0.0,
+            lidar_max_points=(
+                points
+                if isinstance(points, int) and not isinstance(points, bool)
+                else 360
+            ),
+            lidar_available=obj.get("lidar_available") is True,
+            imu_available=obj.get("imu_available") is True,
+            error=_s(obj, "error"),
+        )
+
+
+@dataclass(frozen=True)
+class LidarScan:
+    """A bounded sample of the robot's filtered ``/scan`` LaserScan."""
+
+    stamp: RosStamp = field(default_factory=RosStamp)
+    frame_id: str = ""
+    angle_min_rad: float = 0.0
+    angle_max_rad: float = 0.0
+    angle_increment_rad: float = 0.0
+    time_increment_s: float = 0.0
+    scan_time_s: float = 0.0
+    range_min_m: float = 0.0
+    range_max_m: float = 0.0
+    source_points: int = 0
+    ranges_m: tuple[float | None, ...] = ()
+    intensities: tuple[float | None, ...] | None = None
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> LidarScan:
+        ranges = _nullable_numbers(obj, "ranges_m")
+        raw_intensities = obj.get("intensities")
+        return cls(
+            stamp=RosStamp.from_wire(obj.get("stamp")),
+            frame_id=_s(obj, "frame_id") or "",
+            angle_min_rad=_f(obj, "angle_min_rad") or 0.0,
+            angle_max_rad=_f(obj, "angle_max_rad") or 0.0,
+            angle_increment_rad=_f(obj, "angle_increment_rad") or 0.0,
+            time_increment_s=_f(obj, "time_increment_s") or 0.0,
+            scan_time_s=_f(obj, "scan_time_s") or 0.0,
+            range_min_m=_f(obj, "range_min_m") or 0.0,
+            range_max_m=_f(obj, "range_max_m") or 0.0,
+            source_points=(
+                _i(obj, "source_points", len(ranges))
+                if isinstance(obj.get("source_points"), int)
+                and not isinstance(obj.get("source_points"), bool)
+                else len(ranges)
+            ),
+            ranges_m=ranges,
+            intensities=(
+                _nullable_numbers(obj, "intensities")
+                if isinstance(raw_intensities, list)
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ImuSample:
+    """Quaternion, SI vectors and covariance arrays from ``/imu/data``."""
+
+    stamp: RosStamp = field(default_factory=RosStamp)
+    frame_id: str = ""
+    orientation_xyzw: tuple[float | None, ...] = ()
+    orientation_covariance: tuple[float | None, ...] = ()
+    angular_velocity_rad_s: tuple[float | None, ...] = ()
+    angular_velocity_covariance: tuple[float | None, ...] = ()
+    linear_acceleration_m_s2: tuple[float | None, ...] = ()
+    linear_acceleration_covariance: tuple[float | None, ...] = ()
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> ImuSample:
+        return cls(
+            stamp=RosStamp.from_wire(obj.get("stamp")),
+            frame_id=_s(obj, "frame_id") or "",
+            orientation_xyzw=_nullable_numbers(obj, "orientation_xyzw"),
+            orientation_covariance=_nullable_numbers(
+                obj, "orientation_covariance"
+            ),
+            angular_velocity_rad_s=_nullable_numbers(
+                obj, "angular_velocity_rad_s"
+            ),
+            angular_velocity_covariance=_nullable_numbers(
+                obj, "angular_velocity_covariance"
+            ),
+            linear_acceleration_m_s2=_nullable_numbers(
+                obj, "linear_acceleration_m_s2"
+            ),
+            linear_acceleration_covariance=_nullable_numbers(
+                obj, "linear_acceleration_covariance"
+            ),
+        )
+
+
 @dataclass(frozen=True)
 class Perception:
     """A `perception` frame: what the robot's vision stack currently believes is in front of
@@ -635,6 +884,7 @@ class ConnectStatus:
 __all__ = [
     "RECOVERY_ERROR_CODES",
     "TERMINAL_ACTION_STATES",
+    "TERMINAL_NAVIGATION_STATES",
     "ActionStatus",
     "ArmSide",
     "CameraLayout",
@@ -644,13 +894,20 @@ __all__ = [
     "DaemonStatus",
     "JogScale",
     "LinkMode",
+    "LidarScan",
+    "ImuSample",
+    "NavigationState",
+    "NavigationStatus",
     "Perception",
     "PolicyStreamStatus",
     "RecordState",
     "RobotDescriptor",
     "RobotError",
     "RobotInfo",
+    "RosStamp",
     "SafetyState",
+    "SensorStreamStatus",
     "Telemetry",
     "WatchdogProfile",
+    "WaypointSummary",
 ]

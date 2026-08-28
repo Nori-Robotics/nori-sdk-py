@@ -115,6 +115,7 @@ suite uses and `mock_session()` exists to replace.
 | **Lifecycle** | `start()` · `stop()` · `async with` · `wait_connected()` · `wait_ready() -> RobotInfo` |
 | **State** (properties) | `status` · `info` · `telemetry` · `daemon_status` · `camera_layout` · `is_connected` |
 | **Motion** | `jog(payload, duration=)` · `set_jog(payload)` · `stop_jog()` · `action(targets, wait=)` · `pose(side, position_m, orientation_xyzw=, wait=)` |
+| **Navigation** | `remember_waypoint(name)` · `list_waypoints()` · `delete_waypoint(name)` · `navigate_to_waypoint(name)` · `await_navigation(goal_id)` · `cancel_navigation(goal_id=)` |
 | **Safety** | `estop()` · `estop_confirmed(timeout=)` · `reset_latch()` · `reset_arm(arm)` |
 | **Recording** | `record(verb, task=)` |
 | **Video** | `set_video_bitrate(kbps)` · `set_video_paused(bool)` · `frames()` · `snapshot(role=)` |
@@ -139,6 +140,47 @@ still not execution, so unattended runs use `estop_confirmed()`, which awaits th
 dependency — they yield `av.VideoFrame` when the `webrtc` extra is installed. Both raise a
 named `TeleopError` when no video track arrives within `track_timeout`: a session is
 perfectly healthy with video down, and an unattended caller needs an error, not a hang.
+
+#### Named navigation
+
+Robots advertising `named_navigation` expose named destinations tied to the active saved map:
+
+```python
+await robot.remember_waypoint("charging station")
+started = await robot.navigate_to_waypoint("charging station")
+if not started.ok or not started.goal_id:
+    raise RuntimeError(started.error)
+result = await robot.await_navigation(started.goal_id, timeout=120.0)
+```
+
+`list_waypoints()`, `delete_waypoint()`, `cancel_navigation()`, and
+`get_navigation_status()` complete the surface; `robot.navigation_status` holds the latest
+snapshot. The SDK retries one-shot requests with the same UUID, so packet loss cannot duplicate
+a physical goal. Localization, active-map matching, Nav2, and software E-stop checks remain
+robot-local. The gateway scopes goals to the authenticated SDK session and cancels that
+session's goal when it disconnects.
+
+#### LiDAR and IMU
+
+Robots advertising `sensor_streams` expose opt-in, bounded data from the filtered `/scan`
+LiDAR topic and `/imu/data`:
+
+```python
+status = await robot.configure_sensor_streams(
+    lidar_hz=5,
+    imu_hz=20,
+    lidar_max_points=360,
+)
+
+async for scan in robot.stream("lidar_scan"):
+    print(scan.frame_id, scan.ranges_m)
+```
+
+Use `stream("imu")` for typed `ImuSample` values, or poll `robot.lidar_scan` and
+`robot.imu_sample`. `get_sensor_stream_status()` reports effective settings and current ROS
+publisher presence. Set a rate to zero to stop it; omitted settings are unchanged. LiDAR is
+capped at 10 Hz and 1,440 delivered readings, IMU at 50 Hz. Non-finite ROS values are `None`.
+The mock emits deterministic scans and stationary IMU samples through the same API.
 
 #### Cartesian pose targets — `pose()`
 
@@ -177,7 +219,9 @@ never moves implicitly — a pose out of reach at the current lift height is a r
 ### Wire types — `nori_sdk.types`
 
 `RobotInfo` · `RobotDescriptor` · `WatchdogProfile` · `Telemetry` · `CameraLayout` ·
-`DaemonStatus` · `ActionStatus` · `RecordState` · `PolicyStreamStatus` · `Perception` ·
+`DaemonStatus` · `ActionStatus` · `NavigationStatus` · `WaypointSummary` · `LidarScan` ·
+`ImuSample` · `SensorStreamStatus` · `RosStamp` · `RecordState` ·
+`PolicyStreamStatus` · `Perception` ·
 `RobotError` · `ConnectStatus`, plus `TERMINAL_ACTION_STATES` and `RECOVERY_ERROR_CODES`.
 
 Four have sharp edges worth knowing before you use them:
@@ -195,7 +239,7 @@ Four have sharp edges worth knowing before you use them:
 ### Frame vocabulary — `nori_sdk.protocol`
 
 Builders (`control_jog`, `control_action`, `control_leader`, `control_reset`, `command`,
-`video_*`, `link`, `record`, `policy_stream`, `call`) plus `encode` / `decode`,
+`video_*`, `link`, `record`, `policy_stream`, `call`, `navigation`, `sensor_stream`) plus `encode` / `decode`,
 `INBOUND_KINDS` / `OUTBOUND_KINDS`, `RecordVerb` and `DESTRUCTIVE_RECORD_VERBS`.
 
 Reach for this to drive your own transport, or to read a field this SDK does not model yet:
