@@ -91,16 +91,6 @@ async def mock_session(
     teleop._set_phase("connected")
     teleop._connected.set()
 
-    # Let the double PUSH unsolicited frames, not just answer what it was sent. Sensor
-    # samples and navigation lifecycle snapshots arrive that way on a real robot, so a double
-    # that could only reply would make them untestable through the public helper. Scheduled,
-    # not inline, for the same reason _MockChannel schedules its replies.
-    def _push(raw: str) -> None:
-        loop = asyncio.get_running_loop()
-        loop.call_soon(teleop._handle_frame, raw)
-
-    bot._on_send = _push
-
     for frame in bot.on_channel_open():
         teleop._handle_frame(frame)
 
@@ -109,6 +99,8 @@ async def mock_session(
         while True:
             await asyncio.sleep(interval)
             bot.step(interval)
+            for event in bot.drain_events():
+                teleop._handle_frame(event)
             teleop._handle_frame(bot.telemetry())
 
     task = asyncio.create_task(pump()) if telemetry_hz > 0 else None

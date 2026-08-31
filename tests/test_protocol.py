@@ -8,7 +8,16 @@ Python half of a shared corpus rather than a hand-maintained second opinion.
 import json
 
 from nori_sdk import protocol
-from nori_sdk.types import CameraLayout, DaemonStatus, RobotInfo, Telemetry
+from nori_sdk.types import (
+    CameraLayout,
+    DaemonStatus,
+    ImuSample,
+    LidarScan,
+    NavigationStatus,
+    RobotInfo,
+    SensorStreamStatus,
+    Telemetry,
+)
 
 
 def test_control_jog_shape():
@@ -70,6 +79,40 @@ def test_record_omits_empty_task():
     assert protocol.record("episode_start", "fold towel")["task"] == "fold towel"
 
 
+def test_navigation_start_is_correlated():
+    frame = protocol.navigation(
+        "start",
+        "2776adbf-44d1-4887-bcf0-a175ae186d1b",
+        name="Dock",
+        goal_id="90b234d9-9582-4d5b-9792-7f81080a4dcb",
+    )
+    assert frame == {
+        "type": "navigation",
+        "request_id": "2776adbf-44d1-4887-bcf0-a175ae186d1b",
+        "action": "start",
+        "name": "Dock",
+        "goal_id": "90b234d9-9582-4d5b-9792-7f81080a4dcb",
+    }
+
+
+def test_sensor_stream_configuration_is_correlated():
+    frame = protocol.sensor_stream(
+        "configure",
+        "f4283fa1-5a3b-4295-99d5-3f6baf87b04d",
+        lidar_hz=5,
+        imu_hz=20,
+        lidar_max_points=180,
+    )
+    assert frame == {
+        "type": "sensor_stream",
+        "request_id": "f4283fa1-5a3b-4295-99d5-3f6baf87b04d",
+        "action": "configure",
+        "lidar_hz": 5,
+        "imu_hz": 20,
+        "lidar_max_points": 180,
+    }
+
+
 def test_encode_is_compact():
     assert protocol.encode({"type": "command", "estop": True}) == '{"type":"command","estop":true}'
 
@@ -80,6 +123,10 @@ def test_decode_dispatches_every_known_kind():
         "telemetry": Telemetry,
         "camera_layout": CameraLayout,
         "daemon_status": DaemonStatus,
+        "navigation_status": NavigationStatus,
+        "sensor_stream_status": SensorStreamStatus,
+        "lidar_scan": LidarScan,
+        "imu": ImuSample,
     }
     for kind, expected in cases.items():
         payload = {"type": kind}

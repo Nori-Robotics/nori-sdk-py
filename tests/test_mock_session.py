@@ -54,6 +54,20 @@ async def test_pose_works_against_a_plain_mock_session():
         assert status is not None and status.done
 
 
+async def test_named_navigation_works_against_a_plain_mock_session():
+    async with mock_session(telemetry_hz=60.0) as robot:
+        info = await robot.wait_ready()
+        assert info.supports("named_navigation") is True
+        remembered = await robot.remember_waypoint("Dock")
+        assert remembered.ok and remembered.name == "Dock"
+        listed = await robot.list_waypoints()
+        assert [waypoint.name for waypoint in listed.waypoints] == ["Dock"]
+        started = await robot.navigate_to_waypoint("Dock")
+        assert started.ok and started.goal_id
+        finished = await robot.await_navigation(started.goal_id, timeout=2.0)
+        assert finished.state == "succeeded"
+
+
 async def test_telemetry_streams_and_reflects_what_was_commanded():
     async with mock_session(telemetry_hz=60.0) as robot:
         info = await robot.wait_ready()
@@ -62,6 +76,22 @@ async def test_telemetry_streams_and_reflects_what_was_commanded():
         async for telemetry in robot.stream("telemetry"):
             if telemetry.state.get("left_arm_gripper.pos", 0.0) > 0:
                 break
+
+
+async def test_mock_session_streams_lidar_and_imu_when_requested():
+    async with mock_session(telemetry_hz=60.0) as robot:
+        status = await robot.configure_sensor_streams(
+            lidar_hz=5,
+            imu_hz=20,
+            lidar_max_points=32,
+        )
+        assert status.ok
+        lidar = await anext(robot.stream("lidar_scan"))
+        imu = await anext(robot.stream("imu"))
+        assert len(lidar.ranges_m) == 32
+        assert lidar.source_points == 360
+        assert imu.frame_id == "imu_link"
+        assert imu.linear_acceleration_m_s2[-1] == 9.81
 
 
 async def test_the_awkward_robots_are_reachable_through_the_helper():

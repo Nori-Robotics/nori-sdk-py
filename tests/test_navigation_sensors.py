@@ -33,13 +33,17 @@ class SilentNavigation(MockRobot):
 
 
 class NeverFinishes(MockRobot):
-    """Starts a goal and reports progress, but never reports it finishing."""
+    """Reports a goal as navigating and never lets it finish.
 
-    def _navigation(self, message: dict[str, Any]) -> list[dict[str, Any]]:
-        frames = super()._navigation(message)
-        if message.get("action") == "start":
-            return [f for f in frames if f.get("state") != self.navigation_outcome]
-        return frames
+    The double runs its lifecycle off `step()`, so the honest way to model a goal that never
+    completes is to stop the clock advancing for it — not to filter the terminal frame out
+    of a reply."""
+
+    def step(self, dt: float) -> None:
+        held = self._navigation_active
+        super().step(dt)
+        if held is not None and self._navigation_active is None:
+            self._navigation_active = held  # never let it settle
 
 
 # --- the lifecycle ---------------------------------------------------------------------------
@@ -169,29 +173,30 @@ async def test_sensor_streams_are_off_until_asked_for():
     bot = MockRobot()
     async with mock_session(bot) as robot:
         await robot.wait_ready()
-        assert bot.emit_sensor_samples() == []
-        await asyncio.sleep(0)
+        # A feed nobody asked for produces nothing, however long the robot runs.
+        bot.step(1.0)
+        assert bot.drain_events() == []
         assert robot.lidar_scan is None
         assert robot.imu_sample is None
 
         status = await robot.configure_sensor_streams(lidar_hz=5, imu_hz=20)
         assert status.ok and status.lidar_hz == 5 and status.imu_hz == 20
-        bot.emit_sensor_samples()
-        await asyncio.sleep(0)  # pushes are scheduled, like a real data channel's
-        scan, sample = robot.lidar_scan, robot.imu_sample
+        scan = await anext(robot.stream("lidar_scan"))
+        sample = await anext(robot.stream("imu"))
         assert isinstance(scan, LidarScan) and isinstance(sample, ImuSample)
         assert scan.frame_id == "laser"
-        assert sample.linear_acceleration_m_s2 == (0.0, 0.0, 9.81)
+        assert sample.linear_acceleration_m_s2[-1] == 9.81
 
 
 async def test_a_zero_rate_stops_a_feed_without_stopping_the_other():
     bot = MockRobot()
-    async with mock_session(bot) as robot:
+    async with mock_session(bot, telemetry_hz=0) as robot:
         await robot.wait_ready()
         await robot.configure_sensor_streams(lidar_hz=5, imu_hz=20)
         await robot.configure_sensor_streams(lidar_hz=0)
-        kinds = [json.loads(raw)["type"] for raw in bot.emit_sensor_samples()]
-        assert kinds == ["imu"]
+        bot.step(1.0)
+        kinds = {json.loads(raw)["type"] for raw in bot.drain_events()}
+        assert kinds == {"imu"}, "a zero rate must silence only its own feed"
 
 
 async def test_impossible_rates_never_reach_the_wire():

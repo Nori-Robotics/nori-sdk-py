@@ -51,11 +51,22 @@ parses to `None` — a measurement gap, never a distance.
 
 ### `MockRobot` grew the navigation and sensor vocabulary
 
-Waypoint storage, the goal lifecycle, `navigation_outcome` for rehearsing an abort, and
-`emit_sensor_samples()`. It now mirrors the gateway's request-id idempotency window — 256
-replies, evicted oldest-written-first — so a retry landing past the window re-runs here
-exactly as it would on a robot. Non-UUID request ids are dropped, as the gateway drops them.
-`mock_session()` can now deliver unsolicited robot frames, not only replies.
+Waypoint storage plus a goal lifecycle driven from `step()`, so a goal takes 1.5 simulated
+seconds and reports real `distance_remaining_m` / `estimated_time_remaining_s` on the way —
+`stream("lidar_scan")` and progress feedback behave as they do on a robot rather than
+resolving instantly. The clock is accumulated `dt`, never wall time, so a test advances two
+seconds deterministically. `drain_events()` hands back the unsolicited frames a step
+produced, and `mock_session()` pumps them.
+
+Three robot behaviours the double now refuses to fake:
+
+- **The software E-stop gates navigation.** A latched robot refuses a start outright, and
+  latching mid-goal cancels it. This is the behaviour most worth rehearsing without hardware.
+- **The request-id idempotency window is finite** — 256 replies, evicted oldest-written-first,
+  matching the gateway. A retry landing past the window genuinely re-runs, as it would on a
+  robot; an unbounded cache made every retry look idempotent forever.
+- **Non-UUID request ids are dropped** with no reply, as the gateway drops them, and the
+  rate bounds are revalidated robot-side rather than trusted from the client.
 
 ## 1.0.1 — 2026-08-26
 
