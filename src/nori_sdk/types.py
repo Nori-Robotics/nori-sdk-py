@@ -29,6 +29,7 @@ manufacture a state the robot never reported.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -67,6 +68,44 @@ def _s(obj: dict[str, Any], key: str) -> str | None:
 def _i(obj: dict[str, Any], key: str, default: int = 0) -> int:
     v = obj.get(key)
     return v if isinstance(v, int) and not isinstance(v, bool) else default
+
+
+def _fd(obj: dict[str, Any], key: str, default: float = 0.0) -> float:
+    v = _f(obj, key)
+    return default if v is None else v
+
+
+def _ob(obj: dict[str, Any], key: str) -> bool | None:
+    v = obj.get(key)
+    return v if isinstance(v, bool) else None
+
+
+def _oi(obj: dict[str, Any], key: str) -> int | None:
+    v = obj.get(key)
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _opt_nums(
+    obj: dict[str, Any], key: str, length: int | None = None
+) -> tuple[float | None, ...]:
+    """A ROS numeric array as floats, with every non-finite reading as None.
+
+    JSON has no NaN/Infinity, but Python's json.loads accepts both, and a ROS scan uses them
+    for "no reading". None is therefore a MEASUREMENT GAP, never a distance -- collapsing it
+    to 0.0 would invent an obstacle at the sensor origin. When `length` is given the result is
+    padded/truncated to it, so a fixed-size covariance is always indexable."""
+    raw = obj.get(key)
+    items = raw if isinstance(raw, list) else []
+    out: list[float | None] = []
+    for item in items:
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            value = float(item)
+            out.append(value if math.isfinite(value) else None)
+        else:
+            out.append(None)
+    if length is not None:
+        out = out[:length] + [None] * max(0, length - len(out))
+    return tuple(out)
 
 
 def _num_map(obj: dict[str, Any], key: str) -> dict[str, float]:
@@ -632,9 +671,246 @@ class ConnectStatus:
     detail: str | None = None
 
 
+# --- named navigation ------------------------------------------------------------------------
+
+# The robot's navigation lifecycle. `unavailable` means the robot cannot navigate at all right
+# now (no map, not localized, Nav2 down, software E-stop unknown or active) -- distinct from
+# `failed`, which is a goal that was attempted and did not finish.
+NavigationState = Literal[
+    "idle",
+    "starting",
+    "navigating",
+    "canceling",
+    "succeeded",
+    "canceled",
+    "aborted",
+    "failed",
+    "unavailable",
+]
+
+# States a goal never leaves. await_navigation() resolves on exactly these.
+TERMINAL_NAVIGATION_STATES: frozenset[str] = frozenset(
+    {"succeeded", "canceled", "aborted", "failed", "unavailable"}
+)
+
+
+@dataclass(frozen=True)
+class WaypointSummary:
+    """One saved destination on the robot's active map."""
+
+    name: str = ""
+    saved_at_unix: float = 0.0
+
+
+@dataclass(frozen=True)
+class NavigationStatus:
+    """A `navigation_status` frame: either the correlated reply to one request, or an
+    unsolicited lifecycle snapshot.
+
+    Snapshots are SELF-CONTAINED and keyed by `goal_id`, so loss, duplication and reordering
+    are all tolerable -- act on the latest one for a goal rather than accumulating deltas.
+    `request_id` is present on a direct reply and absent on an unsolicited update.
+
+    Unlike the TypeScript SDK this class is never synthesized by the client: when the robot
+    does not answer, this SDK raises `RobotUnreachable` instead of returning a status, so a
+    transport failure can never be misread as the robot reporting that it stopped."""
+
+    ok: bool = False
+    # A plain string at runtime: a newer robot's unfamiliar state renders as itself rather
+    # than being forced onto one this build knows. Test `terminal`, not equality, to ask
+    # whether a goal is over.
+    state: NavigationState = "unavailable"
+    active: bool = False
+    request_id: str | None = None
+    goal_id: str | None = None
+    name: str | None = None
+    map_sha256: str | None = None
+    distance_remaining_m: float | None = None
+    estimated_time_remaining_s: float | None = None
+    number_of_recoveries: int | None = None
+    error_code: int | None = None
+    error: str | None = None
+    replaced: bool | None = None
+    deleted: bool | None = None
+    waypoints: tuple[WaypointSummary, ...] | None = None
+
+    @property
+    def terminal(self) -> bool:
+        """True once this goal can no longer change state."""
+        return self.state in TERMINAL_NAVIGATION_STATES
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> NavigationStatus:
+        # A state this build has never heard of is kept VERBATIM, like SafetyState — never
+        # coerced onto a known one. Coercing to "failed" would make it terminal, and
+        # await_navigation() would then report a finished goal while the robot drove on: the
+        # unknown state is exactly the case where we must not claim the robot stopped.
+        # Terminality is membership in the known terminal set, so an unrecognised state is
+        # simply not terminal, which is the safe default and needs no invention.
+        state: NavigationState = _s(obj, "state") or "unavailable"  # type: ignore[assignment]
+        waypoints: tuple[WaypointSummary, ...] | None = None
+        listed = obj.get("waypoints")
+        if isinstance(listed, list):
+            found: list[WaypointSummary] = []
+            for item in listed:
+                if not isinstance(item, dict):
+                    continue
+                name = _s(item, "name")
+                saved = _f(item, "saved_at_unix")
+                if name and saved is not None:
+                    found.append(WaypointSummary(name=name, saved_at_unix=saved))
+            waypoints = tuple(found)
+        return cls(
+            ok=obj.get("ok") is True,
+            state=state,
+            active=obj.get("active") is True,
+            request_id=_s(obj, "request_id"),
+            goal_id=_s(obj, "goal_id"),
+            name=_s(obj, "name") or None,
+            map_sha256=_s(obj, "map_sha256") or None,
+            distance_remaining_m=_f(obj, "distance_remaining_m"),
+            estimated_time_remaining_s=_f(obj, "estimated_time_remaining_s"),
+            number_of_recoveries=_oi(obj, "number_of_recoveries"),
+            error_code=_oi(obj, "error_code"),
+            error=_s(obj, "error") or None,
+            replaced=_ob(obj, "replaced"),
+            deleted=_ob(obj, "deleted"),
+            waypoints=waypoints,
+        )
+
+
+# --- LiDAR and IMU ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RosStamp:
+    """A ROS header stamp, preserved as-is so a caller can align frames against other ROS
+    data. It is the ROBOT's clock, not the client's -- do not compare it to local time."""
+
+    sec: int = 0
+    nanosec: int = 0
+
+    @classmethod
+    def from_wire(cls, obj: Any) -> RosStamp:
+        stamp = obj if isinstance(obj, dict) else {}
+        return cls(sec=_i(stamp, "sec"), nanosec=_i(stamp, "nanosec"))
+
+
+@dataclass(frozen=True)
+class SensorStreamStatus:
+    """Reply to a `sensor_stream` request: the EFFECTIVE settings after the robot clamped
+    them, plus whether ROS currently sees a publisher on each topic.
+
+    `lidar_available` / `imu_available` are a point-in-time publisher check. Receipt of a
+    fresh sample is the authoritative liveness signal -- a topic can have a publisher that
+    has stopped producing."""
+
+    ok: bool = False
+    request_id: str = ""
+    lidar_hz: float = 0.0
+    imu_hz: float = 0.0
+    lidar_max_points: int = 360
+    lidar_available: bool = False
+    imu_available: bool = False
+    error: str | None = None
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> SensorStreamStatus:
+        return cls(
+            ok=obj.get("ok") is True,
+            request_id=_s(obj, "request_id") or "",
+            lidar_hz=_fd(obj, "lidar_hz"),
+            imu_hz=_fd(obj, "imu_hz"),
+            lidar_max_points=_i(obj, "lidar_max_points", 360),
+            lidar_available=obj.get("lidar_available") is True,
+            imu_available=obj.get("imu_available") is True,
+            error=_s(obj, "error") or None,
+        )
+
+
+@dataclass(frozen=True)
+class LidarScan:
+    """One sampled frame of the filtered `/scan` topic.
+
+    The angle for `ranges_m[i]` is `angle_min_rad + i * angle_increment_rad`, where the
+    increment ALREADY accounts for the robot's sampling stride -- do not re-derive it from
+    `source_points`. `source_points` is how many readings the source scan had before
+    sampling, so `len(ranges_m) < source_points` means you asked for fewer points, not that
+    readings were lost.
+
+    A `None` in `ranges_m` is a non-finite ROS reading (no return), NOT a distance."""
+
+    stamp: RosStamp = field(default_factory=RosStamp)
+    frame_id: str = ""
+    angle_min_rad: float = 0.0
+    angle_max_rad: float = 0.0
+    angle_increment_rad: float = 0.0
+    time_increment_s: float = 0.0
+    scan_time_s: float = 0.0
+    range_min_m: float = 0.0
+    range_max_m: float = 0.0
+    source_points: int = 0
+    ranges_m: tuple[float | None, ...] = ()
+    intensities: tuple[float | None, ...] | None = None
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> LidarScan:
+        ranges = _opt_nums(obj, "ranges_m")
+        return cls(
+            stamp=RosStamp.from_wire(obj.get("stamp")),
+            frame_id=_s(obj, "frame_id") or "",
+            angle_min_rad=_fd(obj, "angle_min_rad"),
+            angle_max_rad=_fd(obj, "angle_max_rad"),
+            angle_increment_rad=_fd(obj, "angle_increment_rad"),
+            time_increment_s=_fd(obj, "time_increment_s"),
+            scan_time_s=_fd(obj, "scan_time_s"),
+            range_min_m=_fd(obj, "range_min_m"),
+            range_max_m=_fd(obj, "range_max_m"),
+            source_points=_i(obj, "source_points", len(ranges)),
+            ranges_m=ranges,
+            intensities=(
+                _opt_nums(obj, "intensities")
+                if isinstance(obj.get("intensities"), list)
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ImuSample:
+    """One `/imu/data` sample, with ROS covariance arrays preserved.
+
+    Every vector keeps its ROS length (4 for the quaternion, 3 for the vectors, 9 for each
+    covariance) so indexing is always safe; a missing or non-finite component is None. ROS
+    signals "this quantity is not provided" with a leading covariance of -1."""
+
+    stamp: RosStamp = field(default_factory=RosStamp)
+    frame_id: str = ""
+    orientation_xyzw: tuple[float | None, ...] = (None, None, None, None)
+    orientation_covariance: tuple[float | None, ...] = (None,) * 9
+    angular_velocity_rad_s: tuple[float | None, ...] = (None, None, None)
+    angular_velocity_covariance: tuple[float | None, ...] = (None,) * 9
+    linear_acceleration_m_s2: tuple[float | None, ...] = (None, None, None)
+    linear_acceleration_covariance: tuple[float | None, ...] = (None,) * 9
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> ImuSample:
+        return cls(
+            stamp=RosStamp.from_wire(obj.get("stamp")),
+            frame_id=_s(obj, "frame_id") or "",
+            orientation_xyzw=_opt_nums(obj, "orientation_xyzw", 4),
+            orientation_covariance=_opt_nums(obj, "orientation_covariance", 9),
+            angular_velocity_rad_s=_opt_nums(obj, "angular_velocity_rad_s", 3),
+            angular_velocity_covariance=_opt_nums(obj, "angular_velocity_covariance", 9),
+            linear_acceleration_m_s2=_opt_nums(obj, "linear_acceleration_m_s2", 3),
+            linear_acceleration_covariance=_opt_nums(obj, "linear_acceleration_covariance", 9),
+        )
+
+
 __all__ = [
     "RECOVERY_ERROR_CODES",
     "TERMINAL_ACTION_STATES",
+    "TERMINAL_NAVIGATION_STATES",
     "ActionStatus",
     "ArmSide",
     "CameraLayout",
@@ -642,15 +918,22 @@ __all__ = [
     "ConnectStatus",
     "ControlMode",
     "DaemonStatus",
+    "ImuSample",
     "JogScale",
+    "LidarScan",
     "LinkMode",
+    "NavigationState",
+    "NavigationStatus",
     "Perception",
     "PolicyStreamStatus",
     "RecordState",
     "RobotDescriptor",
     "RobotError",
     "RobotInfo",
+    "RosStamp",
     "SafetyState",
+    "SensorStreamStatus",
     "Telemetry",
     "WatchdogProfile",
+    "WaypointSummary",
 ]

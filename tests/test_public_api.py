@@ -26,12 +26,16 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nori_sdk"
 EXPECTED_TOP_LEVEL = {
     # protocol version + constant sets
     "NORI_PROTOCOL_VERSION", "RECOVERY_ERROR_CODES", "TERMINAL_ACTION_STATES",
+    "TERMINAL_NAVIGATION_STATES",
     # wire types
     "ActionStatus", "CameraLayout", "ConnectStatus", "DaemonStatus", "Perception",
     "PolicyStreamStatus", "RecordState", "RobotDescriptor", "RobotError", "RobotInfo",
     "Telemetry", "WatchdogProfile",
+    # wire types: named navigation + opt-in LiDAR/IMU streams
+    "ImuSample", "LidarScan", "NavigationState", "NavigationStatus", "RosStamp",
+    "SensorStreamStatus", "WaypointSummary",
     # session
-    "RemoteTeleop", "TeleopError",
+    "RemoteTeleop", "RobotUnreachable", "TeleopError",
     # signaling
     "IcePayload", "NackPayload", "ReadyTurn", "SdpPayload", "SignalingHandlers",
     "SignalingState", "SignalingTransport", "SupabaseSignaling",
@@ -42,7 +46,7 @@ EXPECTED_TOP_LEVEL = {
 }
 
 # Needs an optional extra, so it cannot be resolved by a bare getattr in every environment.
-LAZY = {"RemoteTeleop", "TeleopError", "SupabaseSignaling"}
+LAZY = {"RemoteTeleop", "TeleopError", "RobotUnreachable", "SupabaseSignaling"}
 
 
 def test_the_top_level_surface_is_exactly_what_we_promised():

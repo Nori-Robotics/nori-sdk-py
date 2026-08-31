@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
@@ -114,6 +116,7 @@ class MockRobot:
         protocol_version: int = NORI_PROTOCOL_VERSION,
         on_send: Callable[[str], None] | None = None,
         action_outcome: str = "done",
+        navigation_outcome: str = "succeeded",
         capabilities: list[str] | None = None,
         tiles: list[str] | None = None,
     ) -> None:
@@ -134,6 +137,16 @@ class MockRobot:
         # How an accepted action ENDS: "done", "clamped" or "timeout". Set it to rehearse the
         # outcomes a script has to handle but a bench robot rarely produces on demand.
         self.action_outcome = action_outcome
+        # How a started goal ends. Set "aborted" to rehearse a Nav2 failure, or "canceled"
+        # to rehearse somebody pressing stop, without needing a robot or a map.
+        self.navigation_outcome = navigation_outcome
+        self.waypoints: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        self.navigating: dict[str, Any] | None = None
+        self.lidar_hz = 0.0
+        self.imu_hz = 0.0
+        self.lidar_max_points = 360
+        self._nav_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._sensor_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # The optional verbs this double HONOURS -- and it honours exactly these, no more:
         # handle() checks this list before acting, so the double can never quietly serve a
         # verb it did not advertise. The default is what a healthy A3 gateway sends with
@@ -143,7 +156,7 @@ class MockRobot:
         # while working on hardware. Trim the list to rehearse the capability gate:
         #     MockRobot(capabilities=["task_jog", "record"])   # pose() refuses pre-flight
         self.capabilities = (
-            ["task_jog", "pose_targets", "record"]
+            ["task_jog", "pose_targets", "record", "named_navigation", "sensor_streams"]
             if capabilities is None
             else list(capabilities)
         )
@@ -534,7 +547,260 @@ class MockRobot:
             return [self._emit(self._record(message))]
         if kind == "policy_stream":
             return [self._emit(self._policy_stream(message))]
+        if kind == "navigation":
+            return [self._emit(frame) for frame in self._navigation(message)]
+        if kind == "sensor_stream":
+            return [self._emit(frame) for frame in self._sensor_stream(message)]
         return []  # video/call are bridge-intercepted; no audio device in a double
+
+    # --- named navigation + sensor streams ----------------------------------------------------
+
+    # The gateway remembers only its last REQUEST_HISTORY replies per session and evicts
+    # oldest-WRITTEN first (nori_gateway protocol.py). It is a fixed window, not a true LRU:
+    # a cache hit replays the reply but does NOT refresh its position. Matched here exactly,
+    # because an unbounded cache would make every retry look idempotent forever and hide what
+    # a real robot does when a retry lands after its reply aged out.
+    REQUEST_HISTORY = 256
+
+    @staticmethod
+    def _is_uuid(value: Any) -> bool:
+        """The gateway DROPS a request whose id is not a UUID — silently, no reply. Enforced
+        here so code that mints its own ids fails against the double, not on hardware."""
+        if not isinstance(value, str):
+            return False
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            return False
+        return True
+
+    def _remember(
+        self, cache: OrderedDict[str, dict[str, Any]], request_id: str, reply: dict[str, Any]
+    ) -> dict[str, Any]:
+        cache[request_id] = reply
+        cache.move_to_end(request_id)
+        while len(cache) > self.REQUEST_HISTORY:
+            cache.popitem(last=False)
+        return reply
+
+    def _nav_snapshot(self, **fields: Any) -> dict[str, Any]:
+        active = self.navigating is not None
+        frame: dict[str, Any] = {
+            "type": "navigation_status",
+            "ok": True,
+            "state": "navigating" if active else "idle",
+            "active": active,
+            "map_sha256": "a" * 64,
+        }
+        if active:
+            assert self.navigating is not None
+            frame["goal_id"] = self.navigating["goal_id"]
+            frame["name"] = self.navigating["name"]
+        frame.update(fields)
+        return frame
+
+    def _navigation(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        """Answer one navigation request, and emit the goal's lifecycle when it starts.
+
+        A started goal runs to `navigation_outcome` within this call, the same way
+        _action_lifecycle settles an action: the double has no clock, and a test that had to
+        pump one would be testing the fixture. The correlated reply comes FIRST and carries
+        request_id; the lifecycle snapshots that follow are unsolicited and carry none, which
+        is exactly how the wire looks."""
+        if "named_navigation" not in self.capabilities:
+            return []
+        request_id = message.get("request_id")
+        if not self._is_uuid(request_id):
+            return []
+        assert isinstance(request_id, str)
+        cached = self._nav_results.get(request_id)
+        if cached is not None:
+            return [dict(cached)]
+
+        action = message.get("action")
+        name = str(message.get("name") or "").strip()
+        key = name.casefold()
+        follow_up: list[dict[str, Any]] = []
+
+        if action == "list_waypoints":
+            reply = self._nav_snapshot(
+                waypoints=[
+                    {"name": stored, "saved_at_unix": saved}
+                    for stored, saved in sorted(self.waypoints.values())
+                ]
+            )
+        elif action == "remember_waypoint":
+            if not name:
+                reply = self._nav_snapshot(ok=False, error="waypoint name must not be empty")
+            elif self.navigating is not None:
+                reply = self._nav_snapshot(ok=False, error="navigation is active")
+            else:
+                replaced = key in self.waypoints
+                self.waypoints[key] = (name, time.time())
+                reply = self._nav_snapshot(name=name, replaced=replaced)
+        elif action == "delete_waypoint":
+            if self.navigating is not None:
+                reply = self._nav_snapshot(ok=False, error="navigation is active")
+            elif key in self.waypoints:
+                del self.waypoints[key]
+                reply = self._nav_snapshot(name=name, deleted=True)
+            else:
+                reply = self._nav_snapshot(
+                    ok=False, name=name, deleted=False, error="waypoint not found"
+                )
+        elif action == "start":
+            goal_id = message.get("goal_id")
+            if self.estopped:
+                reply = self._nav_snapshot(
+                    ok=False, state="unavailable", error="software E-stop is active"
+                )
+            elif not self._is_uuid(goal_id):
+                reply = self._nav_snapshot(
+                    ok=False, error="navigation start requires a UUID goal_id"
+                )
+            elif self.navigating is not None:
+                reply = self._nav_snapshot(ok=False, error="navigation is active")
+            elif key not in self.waypoints:
+                reply = self._nav_snapshot(ok=False, name=name, error="waypoint not found")
+            else:
+                stored, _saved = self.waypoints[key]
+                self.navigating = {"goal_id": goal_id, "name": stored}
+                reply = self._nav_snapshot(state="navigating", active=True)
+                follow_up = [
+                    self._nav_snapshot(
+                        distance_remaining_m=0.4,
+                        estimated_time_remaining_s=1.5,
+                        number_of_recoveries=0,
+                    )
+                ]
+                finished = self._nav_snapshot(
+                    state=self.navigation_outcome,
+                    active=False,
+                    goal_id=goal_id,
+                    name=stored,
+                    distance_remaining_m=0.0,
+                    estimated_time_remaining_s=0.0,
+                )
+                self.navigating = None
+                follow_up.append(finished)
+        elif action == "cancel":
+            requested = message.get("goal_id")
+            if self.navigating is not None and (
+                not requested or requested == self.navigating["goal_id"]
+            ):
+                reply = self._nav_snapshot(
+                    state="canceled",
+                    active=False,
+                    goal_id=self.navigating["goal_id"],
+                    name=self.navigating["name"],
+                )
+                self.navigating = None
+            else:
+                reply = self._nav_snapshot(ok=False, error="navigation goal_id does not match")
+        elif action == "status":
+            reply = self._nav_snapshot()
+        else:
+            reply = self._nav_snapshot(ok=False, error=f"unknown navigation action {action!r}")
+
+        reply["request_id"] = request_id
+        self._remember(self._nav_results, request_id, reply)
+        return [dict(reply), *follow_up]
+
+    def _sensor_stream(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        """Answer one sensor_stream request. Settings are clamped robot-side, exactly like the
+        gateway: a client-side check is a fast failure, never the boundary."""
+        if "sensor_streams" not in self.capabilities:
+            return []
+        request_id = message.get("request_id")
+        if not self._is_uuid(request_id):
+            return []
+        assert isinstance(request_id, str)
+        cached = self._sensor_results.get(request_id)
+        if cached is not None:
+            return [dict(cached)]
+
+        action = message.get("action")
+        error = ""
+        if action == "configure":
+            lidar_hz = message.get("lidar_hz")
+            imu_hz = message.get("imu_hz")
+            points = message.get("lidar_max_points")
+            if isinstance(lidar_hz, (int, float)) and not isinstance(lidar_hz, bool):
+                if not 0.0 <= lidar_hz <= 10.0:
+                    error = "lidar_hz must be between 0 and 10"
+                else:
+                    self.lidar_hz = float(lidar_hz)
+            if not error and isinstance(imu_hz, (int, float)) and not isinstance(imu_hz, bool):
+                if not 0.0 <= imu_hz <= 50.0:
+                    error = "imu_hz must be between 0 and 50"
+                else:
+                    self.imu_hz = float(imu_hz)
+            if not error and isinstance(points, int) and not isinstance(points, bool):
+                if not 16 <= points <= 1440:
+                    error = "lidar_max_points must be an integer between 16 and 1440"
+                else:
+                    self.lidar_max_points = points
+        elif action != "status":
+            error = f"unknown sensor stream action {action!r}"
+
+        reply = {
+            "type": "sensor_stream_status",
+            "request_id": request_id,
+            "ok": not error,
+            "lidar_hz": self.lidar_hz,
+            "imu_hz": self.imu_hz,
+            "lidar_max_points": self.lidar_max_points,
+            "lidar_available": True,
+            "imu_available": True,
+        }
+        if error:
+            reply["error"] = error
+        self._remember(self._sensor_results, request_id, reply)
+        return [dict(reply)]
+
+    def emit_sensor_samples(self) -> list[str]:
+        """Push one sample per ENABLED feed — the double's stand-in for a ROS callback.
+
+        Explicit rather than clock-driven so a test decides exactly when data arrives. A feed
+        left at 0 Hz emits nothing, which is how "off" is meant to look."""
+        frames: list[dict[str, Any]] = []
+        if self.lidar_hz > 0:
+            points = min(360, self.lidar_max_points)
+            increment = 2 * 3.141592653589793 / max(1, points)
+            frames.append(
+                {
+                    "type": "lidar_scan",
+                    "stamp": {"sec": 12, "nanosec": 34},
+                    "frame_id": "laser",
+                    "angle_min_rad": -3.141592653589793,
+                    "angle_max_rad": -3.141592653589793 + increment * max(0, points - 1),
+                    "angle_increment_rad": increment,
+                    "time_increment_s": 0.1 / max(1, points),
+                    "scan_time_s": 0.1,
+                    "range_min_m": 0.05,
+                    "range_max_m": 12.0,
+                    "source_points": 360,
+                    "ranges_m": [
+                        round(2 + 0.25 * (index % 5) / 5, 4) for index in range(points)
+                    ],
+                    "intensities": [10.0] * points,
+                }
+            )
+        if self.imu_hz > 0:
+            frames.append(
+                {
+                    "type": "imu",
+                    "stamp": {"sec": 56, "nanosec": 78},
+                    "frame_id": "imu_link",
+                    "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    "orientation_covariance": [0.01] * 9,
+                    "angular_velocity_rad_s": [0.0, 0.0, 0.0],
+                    "angular_velocity_covariance": [0.01] * 9,
+                    "linear_acceleration_m_s2": [0.0, 0.0, 9.81],
+                    "linear_acceleration_covariance": [0.04] * 9,
+                }
+            )
+        return [self._emit(frame) for frame in frames]
 
     def _action_lifecycle(self) -> list[str]:
         """The action_status states this robot would emit, in order.

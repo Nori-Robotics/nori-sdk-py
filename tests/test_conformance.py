@@ -22,6 +22,7 @@ been fixed, and each former xfail is now an ordinary test guarding the fix.
 from __future__ import annotations
 
 import json
+from typing import get_args
 
 import pytest
 
@@ -30,12 +31,17 @@ from nori_sdk import protocol
 from nori_sdk.motion import JogBuilder
 from nori_sdk.types import (
     TERMINAL_ACTION_STATES,
+    TERMINAL_NAVIGATION_STATES,
     ActionStatus,
     CameraLayout,
     DaemonStatus,
+    ImuSample,
+    LidarScan,
+    NavigationStatus,
     PolicyStreamStatus,
     RobotError,
     RobotInfo,
+    SensorStreamStatus,
 )
 
 jsonschema = pytest.importorskip("jsonschema")
@@ -268,6 +274,123 @@ def test_the_destructive_verb_set_matches_what_the_spec_says_destroys_data():
 def test_every_record_verb_builds_a_valid_frame():
     for action in protocol.RecordVerb.__args__:
         assert_valid(protocol.record(action))
+
+
+REQUEST_ID = "f4283fa1-5a3b-4295-99d5-3f6baf87b04d"
+GOAL_ID = "90b234d9-9582-4d5b-9792-7f81080a4dcb"
+
+
+def test_navigation_requests_validate():
+    assert_valid(protocol.navigation("list_waypoints", REQUEST_ID))
+    assert_valid(protocol.navigation("remember_waypoint", REQUEST_ID, name="Dock"))
+    assert_valid(protocol.navigation("delete_waypoint", REQUEST_ID, name="Dock"))
+    assert_valid(protocol.navigation("start", REQUEST_ID, name="Dock", goal_id=GOAL_ID))
+    assert_valid(protocol.navigation("cancel", REQUEST_ID, goal_id=GOAL_ID))
+    assert_valid(protocol.navigation("status", REQUEST_ID))
+
+
+def test_no_invented_navigation_actions():
+    """The action set is the spec's, exactly — neither missing one nor inventing one."""
+    allowed = set(load_schema("navigation")["properties"]["action"]["enum"])
+    assert set(get_args(protocol.NavigationAction)) == allowed
+
+
+def test_every_navigation_action_the_spec_allows_builds_a_valid_frame():
+    for action in sorted(load_schema("navigation")["properties"]["action"]["enum"]):
+        assert_valid(protocol.navigation(action, REQUEST_ID, name="Dock", goal_id=GOAL_ID))
+
+
+def test_the_destructive_navigation_action_set_is_what_deletes_a_waypoint():
+    """`delete_waypoint` is the only action that destroys saved state. `cancel` stops motion
+    but keeps the destination, and `remember_waypoint` replaces one in place."""
+    assert protocol.DESTRUCTIVE_NAVIGATION_ACTIONS == {"delete_waypoint"}
+    assert protocol.DESTRUCTIVE_NAVIGATION_ACTIONS <= set(
+        load_schema("navigation")["properties"]["action"]["enum"]
+    )
+
+
+def test_sensor_stream_requests_validate():
+    assert_valid(protocol.sensor_stream("status", REQUEST_ID))
+    assert_valid(
+        protocol.sensor_stream(
+            "configure", REQUEST_ID, lidar_hz=5, imu_hz=20, lidar_max_points=360
+        )
+    )
+    # A zero rate is how a feed is turned OFF, so it must stay inside the schema's range.
+    assert_valid(protocol.sensor_stream("configure", REQUEST_ID, lidar_hz=0, imu_hz=0))
+
+
+def test_the_sdk_rate_bounds_are_exactly_the_spec_bounds():
+    """The client-side clamps exist to fail fast, not to invent policy. If the schema widens
+    or narrows, this fails rather than letting the SDK quietly refuse something legal."""
+    teleop = pytest.importorskip("nori_sdk.teleop")
+    props = load_schema("sensor_stream")["properties"]
+    assert (props["lidar_hz"]["minimum"], props["lidar_hz"]["maximum"]) == (
+        0,
+        teleop.LIDAR_MAX_HZ,
+    )
+    assert (props["imu_hz"]["minimum"], props["imu_hz"]["maximum"]) == (
+        0,
+        teleop.IMU_MAX_HZ,
+    )
+    assert (
+        props["lidar_max_points"]["minimum"],
+        props["lidar_max_points"]["maximum"],
+    ) == (teleop.LIDAR_MIN_POINTS, teleop.LIDAR_MAX_POINTS)
+
+
+def test_navigation_terminal_states_match_the_spec():
+    """A state this SDK calls terminal but the robot can leave would strand await_navigation;
+    one it calls non-terminal but the robot never leaves would hang it forever."""
+    states = set(load_schema("navigation_status")["properties"]["state"]["enum"])
+    assert TERMINAL_NAVIGATION_STATES <= states
+    progress = states - TERMINAL_NAVIGATION_STATES
+    assert progress == {"idle", "starting", "navigating", "canceling"}
+
+
+def test_every_navigation_status_field_in_the_spec_is_modelled():
+    schema = load_schema("navigation_status")
+    modelled = set(NavigationStatus.__dataclass_fields__) | {"type"}
+    missing = set(schema["properties"]) - modelled
+    assert not missing, f"unmodelled navigation_status fields: {sorted(missing)}"
+
+
+def test_every_sensor_frame_field_in_the_spec_is_modelled():
+    for message_type, model in (
+        ("sensor_stream_status", SensorStreamStatus),
+        ("lidar_scan", LidarScan),
+        ("imu", ImuSample),
+    ):
+        schema = load_schema(message_type)
+        modelled = set(model.__dataclass_fields__) | {"type"}
+        missing = set(schema["properties"]) - modelled
+        assert not missing, f"unmodelled {message_type} fields: {sorted(missing)}"
+
+
+def test_an_unknown_navigation_state_is_not_treated_as_finished():
+    """A newer robot's unfamiliar state must not read as a terminal outcome. Coercing it onto
+    a known one would make await_navigation() report a finished goal while the robot drove
+    on — the same failure the unreachable contract exists to prevent."""
+    status = NavigationStatus.from_wire(
+        {
+            "type": "navigation_status",
+            "ok": True,
+            "state": "docking",
+            "active": True,
+            "goal_id": GOAL_ID,
+        }
+    )
+    assert status.state == "docking"
+    assert status.terminal is False
+
+
+def test_a_partial_navigation_reply_does_not_read_as_success():
+    """Same rule as policy_stream_status: absent `ok`/`active` must default to False, so a
+    truncated or malformed reply can never read as a robot that is idle and happy."""
+    status = NavigationStatus.from_wire({"type": "navigation_status"})
+    assert status.ok is False
+    assert status.active is False
+    assert status.state == "unavailable"
 
 
 def test_policy_stream_status_models_the_real_fields():

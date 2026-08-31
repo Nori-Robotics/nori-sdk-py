@@ -3,6 +3,60 @@
 Newest first. This package targets **nori-protocol v1** — see the Status section of
 `README.md` for what is and isn't hardware-verified.
 
+## 1.1.0 — unreleased
+
+Additive: thirteen new methods and nine new exports, nothing removed or changed. Targets
+**nori-protocol v1** still — the navigation and sensor frames are additive to the spec and
+carry no version bump.
+
+### Named navigation
+
+`remember_waypoint()`, `list_waypoints()`, `delete_waypoint()`, `navigate_to_waypoint()`,
+`cancel_navigation()`, `get_navigation_status()`, `await_navigation()` and the
+`navigation_status` property, gated on the robot advertising `named_navigation`.
+
+The API takes names, never coordinates: the robot owns localization, active-map matching,
+motion safety and the single-goal rule. A refusal (`ok=False` — "waypoint not found",
+"navigation is active", "software E-stop is active") is RETURNED for the caller to inspect,
+matching `policy_stream()` rather than `record()`.
+
+### `RobotUnreachable` — a lost reply is not a lost command
+
+When the robot does not answer a correlated request, this SDK **raises** rather than
+returning a status. Returning one would mean inventing `state` and `active`, and a caller
+reading `active=False` off an invented status would read a transport failure as a halted
+robot — for the one verb in this SDK that makes the robot drive itself. The exception
+carries the robot's last real snapshot on `.last_known`, which is stale by definition and
+never evidence of the present. It subclasses `TeleopError`, so existing handlers still work.
+
+Unanswered requests are retried under the SAME `request_id`, which the gateway treats as
+idempotent — that is what lets a one-shot command survive a dropped frame without ever
+starting a second goal.
+
+### An unknown lifecycle state is never treated as finished
+
+A `state` this build has not heard of is kept verbatim rather than coerced onto a known one,
+because coercing it would make it terminal and `await_navigation()` would then report a
+finished goal while the robot drove on. Terminality is membership in
+`TERMINAL_NAVIGATION_STATES`, so an unrecognised state is simply not terminal. Same rule as
+`SafetyState`. (The TypeScript SDK carried the same bug and was fixed in lockstep.)
+
+### Opt-in LiDAR and IMU streams
+
+`configure_sensor_streams()` and `get_sensor_stream_status()`, plus the `lidar_scan`,
+`imu_sample` and `sensor_stream_status` properties, gated on `sensor_streams`. Both feeds are off until asked for; a rate
+of 0 stops one. Bounds (LiDAR 0–10 Hz / 16–1440 points, IMU 0–50 Hz) are the spec's, pinned
+to the schema by a conformance test, and revalidated on the robot. A non-finite ROS reading
+parses to `None` — a measurement gap, never a distance.
+
+### `MockRobot` grew the navigation and sensor vocabulary
+
+Waypoint storage, the goal lifecycle, `navigation_outcome` for rehearsing an abort, and
+`emit_sensor_samples()`. It now mirrors the gateway's request-id idempotency window — 256
+replies, evicted oldest-written-first — so a retry landing past the window re-runs here
+exactly as it would on a robot. Non-UUID request ids are dropped, as the gateway drops them.
+`mock_session()` can now deliver unsolicited robot frames, not only replies.
+
 ## 1.0.1 — 2026-08-26
 
 ### `JogBuilder.arm()` accepts task-space verbs in strict mode

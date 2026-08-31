@@ -323,7 +323,9 @@ Verified against the spec:
   observed-motion failure guards, and this SDK's pose path ran end-to-end over a live
   WebRTC session on 2026-08-26 (modelled terminal round-trip)
 - Descriptor-driven motion helpers
-- `MockRobot` — pinned against the real gateway's frame order and record lifecycle
+- `MockRobot` — pinned against the real gateway's frame order and record lifecycle,
+  including the gateway's request-id idempotency window (a retry inside it replays the
+  remembered reply; past it the action genuinely re-runs) and its UUID-only request ids
 - `LoopbackSignaling` — in-process transport pair for handshake tests
 - `UserAuth` / `DeviceAuth` — Supabase token providers with refresh, skew clamping and backoff
 
@@ -348,6 +350,12 @@ Not yet verified against hardware:
 
 - `frames(track_timeout=)` and the stream shutdown wake-up are unit-tested against the
   mock only.
+- **Named navigation and the LiDAR/IMU streams (1.1.0).** Conformance-validated against
+  `nori-protocol` and exercised end-to-end against `MockRobot`, but no goal has been driven
+  on a robot through this SDK. The robot-side gate that matters most — the software E-stop
+  refusing a start and cancelling an active goal — is verified only in the gateway's own
+  off-Pi tests. Treat `navigate_to_waypoint()` as unproven on hardware until that changes,
+  and keep a physical E-stop within reach.
 
 Planned next (committed direction, no dates):
 

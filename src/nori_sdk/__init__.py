@@ -43,30 +43,39 @@ from .signaling import (
 from .types import (
     RECOVERY_ERROR_CODES,
     TERMINAL_ACTION_STATES,
+    TERMINAL_NAVIGATION_STATES,
     ActionStatus,
     CameraLayout,
     ConnectStatus,
     DaemonStatus,
+    ImuSample,
+    LidarScan,
+    NavigationState,
+    NavigationStatus,
     Perception,
     PolicyStreamStatus,
     RecordState,
     RobotDescriptor,
     RobotError,
     RobotInfo,
+    RosStamp,
+    SensorStreamStatus,
     Telemetry,
     WatchdogProfile,
+    WaypointSummary,
 )
 from .version import NORI_PROTOCOL_VERSION
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 if TYPE_CHECKING:  # import for type checkers only; runtime stays lazy
     from .signaling_supabase import SupabaseSignaling
-    from .teleop import RemoteTeleop, TeleopError
+    from .teleop import RemoteTeleop, RobotUnreachable, TeleopError
 
 _LAZY = {
     "RemoteTeleop": (".teleop", "webrtc"),
     "TeleopError": (".teleop", "webrtc"),
+    "RobotUnreachable": (".teleop", "webrtc"),
     "SupabaseSignaling": (".signaling_supabase", "supabase"),
 }
 
@@ -103,6 +112,7 @@ __all__ = [
     "NORI_PROTOCOL_VERSION",
     "RECOVERY_ERROR_CODES",
     "TERMINAL_ACTION_STATES",
+    "TERMINAL_NAVIGATION_STATES",
     "ActionStatus",
     "AuthError",
     "CameraLayout",
@@ -110,7 +120,11 @@ __all__ = [
     "DaemonStatus",
     "DeviceAuth",
     "IcePayload",
+    "ImuSample",
+    "LidarScan",
     "NackPayload",
+    "NavigationState",
+    "NavigationStatus",
     "Perception",
     "PolicyStreamStatus",
     "ReadyTurn",
@@ -119,7 +133,10 @@ __all__ = [
     "RobotDescriptor",
     "RobotError",
     "RobotInfo",
+    "RobotUnreachable",
+    "RosStamp",
     "SdpPayload",
+    "SensorStreamStatus",
     "SignalingHandlers",
     "SignalingState",
     "SignalingTransport",
@@ -128,6 +145,7 @@ __all__ = [
     "TeleopError",
     "UserAuth",
     "WatchdogProfile",
+    "WaypointSummary",
     "__version__",
     "motion",
     "protocol",
