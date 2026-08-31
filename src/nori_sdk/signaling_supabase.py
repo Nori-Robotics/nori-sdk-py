@@ -343,7 +343,10 @@ class SupabaseSignaling(SignalingTransport):
                             pass
                         return
 
-    def _handle(self, raw: str) -> None:
+    def _handle(self, raw: str | bytes) -> None:
+        # `ws.recv()` is typed `str | bytes` (a binary frame is legal websocket, even though
+        # Phoenix only ever sends text), and json.loads takes either. Widening the annotation
+        # is the honest fix -- `raw` is never used as a str beyond this parse.
         try:
             message = json.loads(raw)
         except Exception:
