@@ -714,6 +714,25 @@ class RemoteTeleop:
         unnecessary. Check `telemetry.safety` to tell them apart."""
         self._send(protocol.command("reset_latch"))
 
+    def set_armed(self, on: bool) -> None:
+        """Arm or disarm the arm buses. Parity with @nori/sdk's setArmed.
+
+        FIRE-AND-FORGET, AND THE REQUEST IS NOT THE STATE. Arming spawns the
+        gateway's ownership keeper and walks the arm buses inactive -> active,
+        which takes TENS OF SECONDS on an A3. The truthful answer comes back on
+        `daemon_status.armed`; wait for that rather than assuming this call
+        worked. A robot without arming support ignores the verb and never
+        reports `armed` at all.
+
+        ONE SESSION AT A TIME. The gateway serves a single WebRTC session and
+        the keeper it spawns lives with the session that armed. So a robot
+        cannot be armed by one client and driven by another — whoever drives
+        must arm. Discovered the hard way: an app session holding the room made
+        an SDK session fail its handshake with `robot_absent` while the robot
+        was neither absent nor offline, merely occupied.
+        """
+        self._send(protocol.command("arm" if on else "disarm"))
+
     def reset_arm(self, arm: str) -> None:
         """Clear one arm's latch/target state ("left_arm" / "right_arm").
 
