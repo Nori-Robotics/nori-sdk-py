@@ -446,6 +446,17 @@ class DaemonStatus:
     reason: str | None = None
     detail: str | None = None
     robot_local_mic_muted: bool | None = None
+    # Whether the arm buses are armed (arbiter ownership held by the keeper).
+    # THE TRUTHFUL ARMED STATE ARRIVES HERE, never from the set_armed() call:
+    # arming is fire-and-forget and takes tens of seconds on an A3, so a client
+    # that treats its own request as the state is wrong for that whole window.
+    # None means this robot does not report arming at all — which is not the
+    # same as disarmed, and must not be rendered as such.
+    #
+    # Note the gateway sets this False during a physical fault even while
+    # ownership is held, because torque is gone with the components: "armed"
+    # would be a lie. Believe the flag, not the request.
+    armed: bool | None = None
 
     @property
     def online(self) -> bool:
@@ -464,11 +475,13 @@ class DaemonStatus:
         if not state:
             return None
         mic = obj.get("robot_local_mic_muted")
+        armed = obj.get("armed")
         return cls(
             state=state,
             reason=_s(obj, "reason"),
             detail=_s(obj, "detail"),
             robot_local_mic_muted=mic if isinstance(mic, bool) else None,
+            armed=armed if isinstance(armed, bool) else None,
         )
 
 

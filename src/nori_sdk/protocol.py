@@ -125,7 +125,7 @@ RecordVerb = Literal[
 # keeps on A3, so it belongs to neither set and a caller must resolve it per robot.
 DESTRUCTIVE_RECORD_VERBS = frozenset({"episode_discard", "session_discard", "discard_last"})
 
-CommandName = Literal["estop", "reset_latch"]
+CommandName = Literal["estop", "reset_latch", "arm", "disarm"]
 
 # Named navigation. Every request carries a UUID `request_id` the robot treats as IDEMPOTENT,
 # so a transport retry of the SAME id can never start a duplicate physical goal. `start` also
