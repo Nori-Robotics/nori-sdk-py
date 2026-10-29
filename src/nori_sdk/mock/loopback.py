@@ -43,8 +43,8 @@ class LoopbackSignaling(SignalingTransport):
             # connect(); schedule it so ordering matches.
             asyncio.get_running_loop().call_soon(lambda: self._spawn(dispatch(handlers.on_open)))
 
-    def send_ready(self, turn: ReadyTurn | None = None) -> None:
-        self._deliver("ready", {"turn": turn.to_wire() if turn else None})
+    def send_ready(self, turn: ReadyTurn | None = None, grant: str | None = None) -> None:
+        self._deliver("ready", {"turn": turn.to_wire() if turn else None, "grant": grant})
 
     def send_sdp(self, payload: SdpPayload) -> None:
         self._deliver("sdp", payload)

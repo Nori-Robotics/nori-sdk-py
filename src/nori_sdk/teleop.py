@@ -138,8 +138,18 @@ class RemoteTeleop:
         turn_credential: str = "",
         on_log: Callable[[str], None] | None = None,
         strict: bool = False,
+        grant: str | Callable[[], str | None] | None = None,
+        certificate: Any = None,
     ) -> None:
         self._signaling = signaling
+        # V1 robot-session grant, sent in `ready`: a string, or a provider called at each ready (a
+        # long session may outlive one grant). The gateway verifies it against its grant public key;
+        # in enforce mode a session without a valid grant is video-only.
+        self._grant = grant
+        # A fixed aiortc RTCCertificate (see generate_certificate): the DTLS fingerprint is then
+        # known BEFORE the peer connection exists, so a grant can be bound to it (`fp` claim) the
+        # way the browser app binds its own. None = aiortc generates one per connection (unbound).
+        self._certificate = certificate
         self._stun = list(stun)
         self._turn_urls = list(turn_urls)
         self._turn_user = turn_user
@@ -208,6 +218,21 @@ class RemoteTeleop:
 
     async def __aexit__(self, *exc: object) -> None:
         await self.stop()
+
+    @staticmethod
+    def generate_certificate() -> tuple[Any, str]:
+        """A fresh DTLS certificate and its fingerprint, `(RTCCertificate, "sha-256:<lower hex>")`.
+
+        Pass the certificate to the constructor and the fingerprint to whoever mints the session
+        grant, so the grant is bound to THIS connection (anti-replay): the gateway compares the
+        grant's `fp` claim with the DTLS fingerprint it sees in the SDP answer. The fingerprint
+        format matches the browser app's (`sha-256:` + hex, no colons); the gateway normalizes both."""
+        from aiortc import RTCCertificate
+
+        cert = RTCCertificate.generateCertificate()
+        fps = cert.getFingerprints()
+        fp = next((f for f in fps if f.algorithm.lower() == "sha-256"), fps[0])
+        return cert, f"{fp.algorithm.lower()}:{fp.value.replace(':', '').lower()}"
 
     async def start(self) -> None:
         """Join the signaling room and begin handshaking. Returns as soon as the room is
@@ -1366,8 +1391,9 @@ class RemoteTeleop:
             if self._turn_urls
             else None
         )
+        grant = self._grant() if callable(self._grant) else self._grant
         with contextlib.suppress(Exception):
-            self._signaling.send_ready(turn)
+            self._signaling.send_ready(turn, grant)
 
     async def _ready_retry_loop(self) -> None:
         while not self._stopped and not self._connected.is_set():
@@ -1411,6 +1437,11 @@ class RemoteTeleop:
                 )
             )
         pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
+        if self._certificate is not None:
+            # aiortc (1.15) generates a certificate per RTCPeerConnection in __init__ and offers no
+            # configuration hook; the list is only READ when the DTLS transport is created (on the
+            # remote description), so replacing it here makes every answer carry our fingerprint.
+            pc._RTCPeerConnection__certificates = [self._certificate]
         self._pc = pc
         self._remote_set = False
 
