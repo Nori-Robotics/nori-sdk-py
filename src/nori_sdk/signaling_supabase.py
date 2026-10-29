@@ -108,10 +108,12 @@ class SupabaseSignaling(SignalingTransport):
         self._thread = threading.Thread(target=self._manage, daemon=True, name="nori-signaling")
         self._thread.start()
 
-    def send_ready(self, turn: ReadyTurn | None = None) -> None:
+    def send_ready(self, turn: ReadyTurn | None = None, grant: str | None = None) -> None:
         payload: dict[str, Any] = {}
         if turn is not None and turn.urls:
             payload["turn"] = turn.to_wire()
+        if grant:
+            payload["grant"] = grant
         self._broadcast("ready", payload)
 
     def send_sdp(self, payload: SdpPayload) -> None:

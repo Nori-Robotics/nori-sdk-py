@@ -120,8 +120,10 @@ class SignalingTransport(abc.ABC):
         NOT once the room is open. Readiness is signalled via handlers.on_open."""
 
     @abc.abstractmethod
-    def send_ready(self, turn: ReadyTurn | None = None) -> None:
-        """Announce that the operator is present and wants an offer."""
+    def send_ready(self, turn: ReadyTurn | None = None, grant: str | None = None) -> None:
+        """Announce that the operator is present and wants an offer. `grant` is the V1 robot-session
+        grant (a backend-minted ES256 JWT); the gateway reads it from the `ready` payload to decide
+        whether this session may take motion authority, and to tell operators apart on preemption."""
 
     @abc.abstractmethod
     def send_sdp(self, payload: SdpPayload) -> None:
