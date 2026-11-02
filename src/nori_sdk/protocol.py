@@ -61,6 +61,7 @@ OUTBOUND_KINDS = frozenset(
         "command",
         "video",
         "link",
+        "frame",
         "record",
         "policy_stream",
         "call",
@@ -254,6 +255,15 @@ def link(mode: str) -> dict[str, Any]:
     return {"type": "link", "mode": mode}
 
 
+def frame(camera: str, request_id: str, want: list[int] | None = None) -> dict[str, Any]:
+    """Ask for one full-resolution camera still (the robot's newest raw JPEG for `camera`), served as
+    chunked `frame` replies keyed by request_id; `want` re-requests only the chunk indices missed."""
+    out: dict[str, Any] = {"type": "frame", "camera": camera, "request_id": request_id}
+    if want is not None:
+        out["want"] = [int(i) for i in want]
+    return out
+
+
 def record(action: RecordVerb, task: str = "", **extra: Any) -> dict[str, Any]:
     """Dataset recording verbs. Every verb draws exactly one `record_status` reply, so a
     client can await each one. Order is session_start -> episode_start -> episode_stop
@@ -432,6 +442,7 @@ __all__ = [
     "link",
     "navigation",
     "policy_stream",
+    "frame",
     "record",
     "sensor_stream",
     "video_bitrate",

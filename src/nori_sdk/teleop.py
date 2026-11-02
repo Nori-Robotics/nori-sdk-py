@@ -192,6 +192,7 @@ class RemoteTeleop:
         self._navigation_goal_waiters: dict[str, asyncio.Future[NavigationStatus]] = {}
         self._sensors: SensorStreamStatus | None = None
         self._sensor_waiters: dict[str, asyncio.Future[SensorStreamStatus]] = {}
+        self._frame_waiters: dict[str, dict[str, Any]] = {}   # request_id -> {"chunks", "n", "error", "event"}
         self._lidar: LidarScan | None = None
         self._imu: ImuSample | None = None
         self._stream_queues: set[asyncio.Queue[Any]] = set()
@@ -756,6 +757,61 @@ class RemoteTeleop:
         if not state.ok:
             raise TeleopError(f"record {action!r} refused: {state.error or 'no reason given'}")
         return state
+
+    # --- raw camera stills -------------------------------------------------------------------
+
+    def _ingest_frame_chunk(self, obj: dict[str, Any]) -> None:
+        w = self._frame_waiters.get(str(obj.get("request_id") or ""))
+        if w is None:
+            return  # a late chunk for a request that already finished
+        if obj.get("ok") is False:
+            w["error"] = str(obj.get("error") or "frame refused")
+        else:
+            i, n, data = obj.get("i"), obj.get("n"), obj.get("data")
+            if isinstance(i, int) and isinstance(n, int) and isinstance(data, str) and 0 <= i < n:
+                w["n"] = n
+                w["chunks"][i] = data
+                w["camera"] = obj.get("camera")
+        w["event"].set()
+
+    async def snapshot_raw(self, camera: str = "overhead", *, timeout: float = 10.0, rounds: int = 4) -> bytes:
+        """One FULL-resolution still of `camera`: the robot's newest raw camera JPEG, as bytes, over the
+        control channel (robot verb `frame`, 2026-11-02). Unlike snapshot(), this is not a tile of the
+        H.264 composite -- it is what the camera produced (1005's overhead: the 1280x480 side-by-side
+        stereo pair). The reply comes in small chunks because the channel is unreliable and unordered;
+        chunks still missing after each round are re-requested by index (the robot serves the SAME
+        frame for the request_id). Raises TeleopError when the robot refuses or the chunks never all
+        arrive within `timeout`."""
+        import base64
+        import uuid
+
+        rid = str(uuid.uuid4())
+        w: dict[str, Any] = {"chunks": {}, "n": None, "error": None, "event": asyncio.Event(), "camera": camera}
+        self._frame_waiters[rid] = w
+        deadline = time.monotonic() + timeout
+        per_round = max(0.5, timeout / max(1, rounds))
+        try:
+            if not self._send(protocol.frame(camera, rid)):
+                raise TeleopError("no control channel: cannot request a frame")
+            while True:
+                round_end = min(deadline, time.monotonic() + per_round)
+                while time.monotonic() < round_end:
+                    if w["error"]:
+                        raise TeleopError(f"frame {camera!r} refused: {w['error']}")
+                    if w["n"] is not None and len(w["chunks"]) == w["n"]:
+                        b64 = "".join(w["chunks"][i] for i in range(w["n"]))
+                        return base64.b64decode(b64)
+                    w["event"].clear()
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(w["event"].wait(), max(0.01, round_end - time.monotonic()))
+                if time.monotonic() >= deadline:
+                    got = len(w["chunks"]); n = w["n"]
+                    raise TeleopError(f"frame {camera!r}: {got}/{n if n is not None else '?'} chunks within {timeout:.0f}s")
+                # re-request what is missing (or everything, if not even one chunk arrived)
+                want = None if w["n"] is None else [i for i in range(w["n"]) if i not in w["chunks"]]
+                self._send(protocol.frame(camera, rid, want))
+        finally:
+            self._frame_waiters.pop(rid, None)
 
     # --- outbound: policy stream / leader / call --------------------------------------------
 
@@ -1512,6 +1568,8 @@ class RemoteTeleop:
             sensor_future = self._sensor_waiters.pop(parsed.request_id, None)
             if sensor_future is not None and not sensor_future.done():
                 sensor_future.set_result(parsed)
+        elif kind == "frame":
+            self._ingest_frame_chunk(obj)
         elif kind == "lidar_scan" and isinstance(parsed, LidarScan):
             self._lidar = parsed
         elif kind == "imu" and isinstance(parsed, ImuSample):
