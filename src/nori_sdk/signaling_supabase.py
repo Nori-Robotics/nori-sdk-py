@@ -115,14 +115,17 @@ class SupabaseSignaling(SignalingTransport):
         self._broadcast("ready", payload)
 
     def send_sdp(self, payload: SdpPayload) -> None:
-        self._broadcast("sdp", {"type": payload.type, "sdp": payload.sdp})
+        wire: dict[str, Any] = {"type": payload.type, "sdp": payload.sdp}
+        if payload.session:
+            wire["session"] = payload.session
+        self._broadcast("sdp", wire)
 
     def send_ice(self, payload: IcePayload) -> None:
         self._broadcast("ice", payload.to_wire())
 
-    def send_bye(self) -> None:
+    def send_bye(self, session: str | None = None) -> None:
         try:
-            self._broadcast("bye", {})
+            self._broadcast("bye", {"session": session} if session else {})
         except Exception:
             pass  # contract: must not raise
 
@@ -392,7 +395,9 @@ class SupabaseSignaling(SignalingTransport):
             kind = payload.get("type")
             sdp = payload.get("sdp")
             if kind in ("offer", "answer") and isinstance(sdp, str):
-                self._call(lambda h: dispatch(h.on_sdp, SdpPayload(type=kind, sdp=sdp)))
+                tok = payload.get("session")
+                self._call(lambda h: dispatch(h.on_sdp, SdpPayload(
+                    type=kind, sdp=sdp, session=tok if isinstance(tok, str) else None)))
         elif event == "ice":
             ice = IcePayload.from_wire(payload)
             if ice is not None:

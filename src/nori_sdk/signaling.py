@@ -33,6 +33,10 @@ SignalingState = Literal["open", "error", "timeout", "closed"]
 class SdpPayload:
     type: Literal["offer", "answer"]
     sdp: str
+    # The robot's per-session token (carried by its offer; echoed on our answer, ICE and bye so the
+    # robot can tell our messages from a bystander's in the same room -- 2026-11-01). None = a robot
+    # that predates the token.
+    session: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,11 +44,15 @@ class IcePayload:
     candidate: str
     sdp_mline_index: int | None = None
     sdp_mid: str | None = None
+    session: str | None = None  # see SdpPayload.session
 
     def to_wire(self) -> dict[str, Any]:
         # The wire key is the browser's camelCase name — the robot and the TS SDK both
         # expect `sdpMLineIndex`. Do not "fix" this to snake_case.
-        return {"candidate": self.candidate, "sdpMLineIndex": self.sdp_mline_index}
+        out: dict[str, Any] = {"candidate": self.candidate, "sdpMLineIndex": self.sdp_mline_index}
+        if self.session:
+            out["session"] = self.session
+        return out
 
     @classmethod
     def from_wire(cls, obj: dict[str, Any]) -> IcePayload | None:
@@ -56,6 +64,7 @@ class IcePayload:
             candidate=cand,
             sdp_mline_index=idx if isinstance(idx, int) and not isinstance(idx, bool) else None,
             sdp_mid=obj.get("sdpMid") if isinstance(obj.get("sdpMid"), str) else None,
+            session=obj.get("session") if isinstance(obj.get("session"), str) else None,
         )
 
 
@@ -132,8 +141,10 @@ class SignalingTransport(abc.ABC):
         """Publish one local ICE candidate."""
 
     @abc.abstractmethod
-    def send_bye(self) -> None:
-        """Best-effort "operator leaving" so the robot restarts cleanly. MUST NOT raise."""
+    def send_bye(self, session: str | None = None) -> None:
+        """Best-effort "operator leaving" so the robot restarts cleanly. MUST NOT raise.
+        `session` is the robot's per-session token from its offer, when it sent one: without it
+        the robot treats the bye as unattributed and ignores it while a session is live."""
 
     @abc.abstractmethod
     async def close(self) -> None:

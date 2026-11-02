@@ -52,9 +52,9 @@ class LoopbackSignaling(SignalingTransport):
     def send_ice(self, payload: IcePayload) -> None:
         self._deliver("ice", payload)
 
-    def send_bye(self) -> None:
+    def send_bye(self, session: str | None = None) -> None:
         try:
-            self._deliver("bye", {})
+            self._deliver("bye", {"session": session} if session else {})
         except Exception:
             pass
 

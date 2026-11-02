@@ -175,6 +175,8 @@ class RemoteTeleop:
         self._video_track: Any = None
         self._pending_ice: list[Any] = []
         self._remote_set = False
+        # The robot's per-session token from its offer, echoed on our answer / ICE / bye.
+        self._session_token: str | None = None
         self._seq = 0
         self._stopped = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -262,7 +264,7 @@ class RemoteTeleop:
                 sensor_waiter.set_exception(RobotUnreachable("sensor stream session closed"))
         self._sensor_waiters.clear()
         with contextlib.suppress(Exception):
-            self._signaling.send_bye()
+            self._signaling.send_bye(self._session_token)
         with contextlib.suppress(Exception):
             await self._signaling.close()
         if self._pc is not None:
@@ -1223,6 +1225,7 @@ class RemoteTeleop:
             from aiortc import RTCSessionDescription
 
             self._log("offer received; building fresh peer and answering")
+            self._session_token = payload.session
             pc = await self._fresh_peer()
             # webrtcbin interop: a fresh gateway can offer H264 without its fmtp
             # line, which aiortc mis-defaults to packetization-mode=0 and then
@@ -1242,7 +1245,7 @@ class RemoteTeleop:
             # this returns our candidates are already in the SDP...
             await pc.setLocalDescription(answer)
             self._signaling.send_sdp(
-                SdpPayload(type="answer", sdp=pc.localDescription.sdp)
+                SdpPayload(type="answer", sdp=pc.localDescription.sdp, session=self._session_token)
             )
             # ...but webrtcbin IGNORES in-SDP candidates — it only consumes ones
             # delivered via the signaling `ice` event. Without this trickle the
@@ -1250,7 +1253,7 @@ class RemoteTeleop:
             # (hardware-confirmed 2026-08-21).
             for mline, cand in webrtc_compat.local_candidates(pc.localDescription.sdp):
                 self._signaling.send_ice(
-                    IcePayload(candidate=cand, sdp_mline_index=mline)
+                    IcePayload(candidate=cand, sdp_mline_index=mline, session=self._session_token)
                 )
             self._log("answer sent")
         except Exception as e:
