@@ -20,6 +20,7 @@ import json
 from typing import Any, Literal
 
 from .types import (
+    Alert,
     ActionStatus,
     CameraLayout,
     DaemonStatus,
@@ -51,6 +52,7 @@ INBOUND_KINDS = frozenset(
         "imu",
         "perception",
         "error",
+        "alert",
     }
 )
 
@@ -390,6 +392,8 @@ def decode(raw: str | bytes) -> tuple[str, Inbound | None, dict[str, Any]]:
         parsed = RobotInfo.from_wire(obj)
     elif kind == "telemetry":
         parsed = Telemetry.from_wire(obj)
+    elif kind == "alert":
+        parsed = Alert.from_wire(obj)
     elif kind == "camera_layout":
         parsed = CameraLayout.from_wire(obj)
     elif kind == "daemon_status":

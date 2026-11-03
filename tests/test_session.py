@@ -406,3 +406,21 @@ async def test_link_mode_degrades_to_wan_when_internals_change():
     teleop._pc = object()
     await teleop._detect_link_mode()
     assert {"type": "link", "mode": "wan"} in channel.sent
+
+
+def test_alerts_are_kept_per_code_until_the_robot_clears_them():
+    """The gateway's `task_jog_limit` alert is the only wire signal for 'no IK solution here'; a script reads
+    `alerts` to tell that case from a joint limit (`telemetry.stalled`) and from contact (`telemetry.currents`)."""
+    import json
+    from nori_sdk.teleop import RemoteTeleop
+    s = RemoteTeleop.__new__(RemoteTeleop)
+    s._alerts = {}; s._telemetry = None; s._log = lambda *a, **k: None; s._listeners = {}
+    s._emit = lambda *a, **k: None
+    s._handle_frame(json.dumps({"type": "alert", "code": "task_jog_limit", "severity": "warning", "active": True,
+                                "message": "right arm cannot reach further with the tool held at this angle."}))
+    assert s.alerts["task_jog_limit"].active
+    s._handle_frame(json.dumps({"type": "alert", "code": "task_jog_limit", "severity": "info", "active": False,
+                                "message": "Cartesian jog is solving again"}))
+    assert not s.alerts["task_jog_limit"].active
+    s._handle_frame(json.dumps({"type": "alert", "severity": "info", "active": True, "message": "no code"}))
+    assert set(s.alerts) == {"task_jog_limit"}

@@ -28,7 +28,7 @@ EXPECTED_TOP_LEVEL = {
     "NORI_PROTOCOL_VERSION", "RECOVERY_ERROR_CODES", "TERMINAL_ACTION_STATES",
     "TERMINAL_NAVIGATION_STATES",
     # wire types
-    "ActionStatus", "CameraLayout", "ConnectStatus", "DaemonStatus", "Perception",
+    "ActionStatus", "Alert", "CameraLayout", "ConnectStatus", "DaemonStatus", "Perception",
     "PolicyStreamStatus", "RecordState", "RobotDescriptor", "RobotError", "RobotInfo",
     "Telemetry", "WatchdogProfile",
     # wire types: named navigation + opt-in LiDAR/IMU streams

@@ -82,3 +82,18 @@ def test_record_state_parses_a_refusal():
         {"type": "record_status", "ok": False, "error": "not recording"}
     )
     assert not state.ok and state.error == "not recording"
+
+
+def test_telemetry_carries_stalled_joints_per_frame():
+    from nori_sdk.types import Telemetry
+    assert Telemetry.from_wire({"type": "telemetry", "stalled": ["right_wrist_roll_joint", 3]}).stalled == ["right_wrist_roll_joint"]
+    assert Telemetry.from_wire({"type": "telemetry"}).stalled == []            # absent on the wire = none this frame
+    assert Telemetry.from_wire({"type": "telemetry", "currents": {"right_elbow_pitch_joint": 212, "x": "no"}}).currents == {"right_elbow_pitch_joint": 212.0}
+
+
+def test_alert_parses_the_no_ik_jog_limit():
+    from nori_sdk.types import Alert
+    a = Alert.from_wire({"type": "alert", "code": "task_jog_limit", "severity": "warning", "active": True,
+                         "message": "right arm cannot reach further with the tool held at this angle.", "ts_ns": 5})
+    assert a is not None and a.code == "task_jog_limit" and a.active and "right arm" in a.message and a.ts_ns == 5
+    assert Alert.from_wire({"type": "alert", "active": True}) is None             # no code: not an alert

@@ -54,6 +54,7 @@ from .signaling import (
     SignalingTransport,
 )
 from .types import (
+    Alert,
     ActionStatus,
     CameraLayout,
     ConnectStatus,
@@ -167,6 +168,7 @@ class RemoteTeleop:
         self._status = ConnectStatus()
         self._info: RobotInfo | None = None
         self._telemetry: Telemetry | None = None
+        self._alerts: dict[str, Alert] = {}
         self._daemon: DaemonStatus | None = None
         self._layout: CameraLayout | None = None
         self._link_mode: str = ""
@@ -354,6 +356,13 @@ class RemoteTeleop:
     def info(self) -> RobotInfo | None:
         """The `ack` handshake: descriptor, ranges, watchdog profile. None until ready."""
         return self._info
+
+    @property
+    def alerts(self) -> dict[str, "Alert"]:
+        """The latest operator alert per code (state, kept until the robot clears it). A script
+        reads `alerts.get("task_jog_limit")`: active means the named arm's Cartesian jog has no
+        IK solution at the held orientation, which is why it stopped short."""
+        return dict(self._alerts)
 
     @property
     def telemetry(self) -> Telemetry | None:
@@ -1548,6 +1557,10 @@ class RemoteTeleop:
         elif kind == "telemetry" and isinstance(parsed, Telemetry):
             self._telemetry = _merge_telemetry(self._telemetry, parsed)
             parsed = self._telemetry
+        elif kind == "alert":
+            if not isinstance(parsed, Alert):
+                return
+            self._alerts[parsed.code] = parsed
         elif kind == "camera_layout" and isinstance(parsed, CameraLayout):
             # Sent repeatedly because the channel is unreliable; treat repeats as idempotent.
             self._layout = parsed

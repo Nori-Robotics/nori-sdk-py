@@ -365,9 +365,14 @@ class Telemetry:
     latch_reason: str | None = None
     motor_faults: dict[str, str] = field(default_factory=dict)
     servo_temps: dict[str, float] = field(default_factory=dict)
+    # Raw Present_Current per motor, from the servo driver via the gateway (~10 Hz). A servo
+    # straining against something that is not a joint limit shows here and nowhere else.
     currents: dict[str, float] = field(default_factory=dict)
     loop_hz: float | None = None
     pi_temp_c: float | None = None
+    # Joints the robot parked at a calibrated endpoint with high effort and no motion (the
+    # gateway's limit-stall detector). Per frame: absent on the wire means none this frame.
+    stalled: list[str] = field(default_factory=list)
 
     @classmethod
     def from_wire(cls, obj: dict[str, Any]) -> Telemetry:
@@ -389,6 +394,42 @@ class Telemetry:
             loop_hz=_f(obj, "loop_hz"),
             # A 0 reading means "no sensor", not "freezing" — drop it like the TS SDK does.
             pi_temp_c=temp if temp and temp > 0 else None,
+            stalled=[x for x in (obj.get("stalled") or []) if isinstance(x, str)]
+            if isinstance(obj.get("stalled"), list) else [],
+        )
+
+
+@dataclass(frozen=True)
+class Alert:
+    """One operator `alert` frame: a named condition (`code`) that is `active` or cleared.
+    State, not a toast: the robot emits it on transition. RemoteTeleop keeps the latest per
+    code in `alerts`. The one a script steers by is `task_jog_limit`: active with the message
+    naming the arm when a Cartesian jog has no IK solution at the held orientation (the arm
+    stops short with every joint inside its range and no servo straining), cleared when the
+    jog solves again."""
+
+    code: str = ""
+    severity: str = "info"
+    active: bool = False
+    message: str = ""
+    latched: bool | None = None
+    joint: str | None = None
+    ts_ns: int = 0
+
+    @classmethod
+    def from_wire(cls, obj: dict[str, Any]) -> Alert | None:
+        code = obj.get("code")
+        if not isinstance(code, str) or not code:
+            return None
+        ts = obj.get("ts_ns")
+        return cls(
+            code=code,
+            severity=str(obj.get("severity") or "info"),
+            active=bool(obj.get("active")),
+            message=str(obj.get("message") or ""),
+            latched=obj.get("latched") if isinstance(obj.get("latched"), bool) else None,
+            joint=_s(obj, "joint"),
+            ts_ns=int(ts) if isinstance(ts, int) and not isinstance(ts, bool) else 0,
         )
 
 
@@ -925,6 +966,7 @@ __all__ = [
     "TERMINAL_ACTION_STATES",
     "TERMINAL_NAVIGATION_STATES",
     "ActionStatus",
+    "Alert",
     "ArmSide",
     "CameraLayout",
     "ConnectPhase",
