@@ -792,15 +792,34 @@ class RemoteTeleop:
         self._send(protocol.video_state(paused))
 
     async def record(
-        self, action: protocol.RecordVerb, task: str = "", timeout: float = 10.0
+        self,
+        action: protocol.RecordVerb,
+        task: str = "",
+        timeout: float = 10.0,
+        *,
+        tags: Iterable[str] | None = None,
+        outcome: protocol.RecordOutcome | None = None,
+        notes: str | None = None,
     ) -> RecordState:
         """Issue one dataset-recording verb and await its `record_status`.
 
+        `tags` (episode_start) are stored with the episode and can select recorder behaviour:
+        "aspire" gives an agent take the long action-silence window. `outcome` and `notes`
+        (episode_stop) label the take; with no `outcome` the robot stores success, so a client
+        that keeps failed takes must say so. A robot older than these fields ignores them.
+
         Replies carry no correlation id, so this resolves the NEXT status frame — do not
         issue record verbs concurrently from two tasks."""
+        extra: dict[str, Any] = {}
+        if tags is not None:
+            extra["tags"] = list(tags)
+        if outcome is not None:
+            extra["outcome"] = outcome
+        if notes is not None:
+            extra["notes"] = notes
         future: asyncio.Future[RecordState] = asyncio.get_running_loop().create_future()
         self._record_waiters.append(future)
-        self._send(protocol.record(action, task))
+        self._send(protocol.record(action, task, **extra))
         try:
             state = await asyncio.wait_for(future, timeout)
         except TimeoutError:

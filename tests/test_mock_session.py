@@ -134,3 +134,24 @@ def test_the_runnable_example_still_runs(script):
     )
     assert result.returncode == 0, f"{script} failed:\n{result.stdout}\n{result.stderr}"
     assert "protocol v" in result.stdout
+
+
+async def test_record_sends_tags_outcome_and_notes_only_when_given():
+    """An agent take needs its tag and its real outcome on the wire; a plain caller's frame
+    must not change, because the robot reads a missing outcome as success."""
+    async with mock_session() as robot:
+        await robot.wait_ready()
+        sent, real = [], robot._send
+
+        def spy(obj):
+            sent.append(obj)
+            return real(obj)
+
+        robot._send = spy
+        await robot.record("session_start")
+        await robot.record("episode_start", task="t", tags=("aspire",))
+        await robot.record("episode_stop", outcome="failure", notes="box tipped")
+    frames = [f for f in sent if f.get("type") == "record"]
+    assert frames[0] == {"type": "record", "action": "session_start"}
+    assert frames[1]["tags"] == ["aspire"]
+    assert frames[2]["outcome"] == "failure" and frames[2]["notes"] == "box tipped"

@@ -109,6 +109,8 @@ Action = dict[str, float]
 #                      session_end). The same verb means opposite things per stack. This
 #                      divergence is real and unresolved upstream -- do not build a UI on it.
 #     discard_last     alias for session_discard on L2, targeting the most recent session.
+RecordOutcome = Literal["success", "failure", "aborted"]
+
 RecordVerb = Literal[
     "session_start",
     "episode_start",
@@ -432,6 +434,7 @@ __all__ = [
     "Inbound",
     "Jog",
     "NavigationAction",
+    "RecordOutcome",
     "RecordVerb",
     "SensorStreamAction",
     "call",
