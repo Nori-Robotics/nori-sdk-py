@@ -29,7 +29,7 @@ EXPECTED_TOP_LEVEL = {
     "TERMINAL_NAVIGATION_STATES",
     # wire types
     "ActionStatus", "Alert", "CameraLayout", "ConnectStatus", "DaemonStatus", "Perception",
-    "PolicyStreamStatus", "RecordState", "RobotDescriptor", "RobotError", "RobotInfo",
+    "PolicyStreamStatus", "RawFrame", "RecordState", "RobotDescriptor", "RobotError", "RobotInfo",
     "Telemetry", "WatchdogProfile",
     # wire types: named navigation + opt-in LiDAR/IMU streams
     "ImuSample", "LidarScan", "NavigationState", "NavigationStatus", "RosStamp",

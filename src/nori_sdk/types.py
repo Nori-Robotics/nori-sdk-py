@@ -619,6 +619,21 @@ class RobotError:
 
 
 @dataclass(frozen=True)
+class RawFrame:
+    """One full-resolution camera still (`RemoteTeleop.snapshot_raw_frame`). All three times are
+    the ROBOT's wall clock in ns, so `served_ns - received_ns` is the frame's age with no clock
+    sync and no link latency in it. `stamp_ns` is the camera message's header stamp, `received_ns`
+    when the robot's gateway got it. On some cameras the header stamp lags arrival, so a client
+    aligning frames must pick one clock per robot. Each is None when the robot did not report it."""
+
+    jpeg: bytes
+    camera: str
+    stamp_ns: int | None = None
+    received_ns: int | None = None
+    served_ns: int | None = None
+
+
+@dataclass(frozen=True)
 class RecordState:
     """Reply to every `record` verb. `episode` is the robot's DISPLAY id ("episode-0001");
     the on-disk UUID is internal and never crosses the wire."""
@@ -981,6 +996,7 @@ __all__ = [
     "NavigationStatus",
     "Perception",
     "PolicyStreamStatus",
+    "RawFrame",
     "RecordState",
     "RobotDescriptor",
     "RobotError",

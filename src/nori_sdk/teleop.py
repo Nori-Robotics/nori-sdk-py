@@ -64,6 +64,7 @@ from .types import (
     NavigationStatus,
     Perception,
     PolicyStreamStatus,
+    RawFrame,
     RecordState,
     RobotInfo,
     SensorStreamStatus,
@@ -844,10 +845,18 @@ class RemoteTeleop:
                 w["n"] = n
                 w["chunks"][i] = data
                 w["camera"] = obj.get("camera")
+                for key in ("stamp_ns", "received_ns", "served_ns"):
+                    value = obj.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                        w["times"][key] = value
         w["event"].set()
 
     async def snapshot_raw(self, camera: str = "overhead", *, timeout: float = 10.0, rounds: int = 4) -> bytes:
-        """One FULL-resolution still of `camera`: the robot's newest raw camera JPEG, as bytes, over the
+        """The JPEG bytes of `snapshot_raw_frame`, for a caller that does not need its capture times."""
+        return (await self.snapshot_raw_frame(camera, timeout=timeout, rounds=rounds)).jpeg
+
+    async def snapshot_raw_frame(self, camera: str = "overhead", *, timeout: float = 10.0, rounds: int = 4) -> RawFrame:
+        """One FULL-resolution still of `camera`: the robot's newest raw camera JPEG and its capture times, over the
         control channel (robot verb `frame`, 2026-11-02). Unlike snapshot(), this is not a tile of the
         H.264 composite -- it is what the camera produced (1005's overhead: the 1280x480 side-by-side
         stereo pair). The reply comes in small chunks because the channel is unreliable and unordered;
@@ -858,7 +867,8 @@ class RemoteTeleop:
         import uuid
 
         rid = str(uuid.uuid4())
-        w: dict[str, Any] = {"chunks": {}, "n": None, "error": None, "event": asyncio.Event(), "camera": camera}
+        w: dict[str, Any] = {"chunks": {}, "n": None, "error": None, "event": asyncio.Event(), "camera": camera,
+                             "times": {}}
         self._frame_waiters[rid] = w
         deadline = time.monotonic() + timeout
         per_round = max(0.5, timeout / max(1, rounds))
@@ -872,7 +882,7 @@ class RemoteTeleop:
                         raise TeleopError(f"frame {camera!r} refused: {w['error']}")
                     if w["n"] is not None and len(w["chunks"]) == w["n"]:
                         b64 = "".join(w["chunks"][i] for i in range(w["n"]))
-                        return base64.b64decode(b64)
+                        return RawFrame(base64.b64decode(b64), camera, **w["times"])
                     w["event"].clear()
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(w["event"].wait(), max(0.01, round_end - time.monotonic()))

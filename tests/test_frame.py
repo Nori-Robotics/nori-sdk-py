@@ -86,3 +86,27 @@ async def test_no_channel_is_a_named_error():
     robot = RemoteTeleop(signaling)
     with pytest.raises(TeleopError, match="no control channel"):
         await robot.snapshot_raw("overhead", timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_raw_frame_reports_the_robots_capture_times():
+    robot, ch = session()
+    task = asyncio.ensure_future(robot.snapshot_raw_frame("overhead", timeout=1.0))
+    await asyncio.sleep(0)
+    rid = ch.sent[-1]["request_id"]
+    for c in _chunks(rid, b"jpeg-bytes-here"):
+        robot._ingest_frame_chunk(dict(c, stamp_ns=100, received_ns=200, served_ns=300))
+    f = await task
+    assert (f.jpeg, f.camera, f.stamp_ns, f.received_ns, f.served_ns) == (b"jpeg-bytes-here", "overhead", 100, 200, 300)
+
+
+@pytest.mark.asyncio
+async def test_a_robot_without_times_gives_none_not_zero():
+    robot, ch = session()
+    task = asyncio.ensure_future(robot.snapshot_raw_frame("overhead", timeout=1.0))
+    await asyncio.sleep(0)
+    rid = ch.sent[-1]["request_id"]
+    for c in _chunks(rid, b"x"):
+        robot._ingest_frame_chunk(dict(c, stamp_ns=0))      # a camera message with no header stamp
+    f = await task
+    assert f.stamp_ns is None and f.received_ns is None and f.served_ns is None
