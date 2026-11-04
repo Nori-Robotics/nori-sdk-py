@@ -32,15 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The spec lives in Nori-Robotics/Nori-Protocol, a PRIVATE repo, so the default
-      # GITHUB_TOKEN cannot read it -- it is scoped to this repository alone. NORI_PROTOCOL_TOKEN
-      # must be a PAT (or app token) with read access to that repo.
+      # The spec lives in Nori-Robotics/Nori-Protocol, a public repo: no token needed, so this
+      # gate cannot go dark on an expired secret (it did, from 2026-09-20 to 2026-11-04).
       - name: Check out nori-protocol
         uses: actions/checkout@v4
         with:
           repository: Nori-Robotics/Nori-Protocol
           path: spec/nori-protocol
-          token: ${{ secrets.NORI_PROTOCOL_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:

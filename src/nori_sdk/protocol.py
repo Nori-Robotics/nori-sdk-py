@@ -20,8 +20,8 @@ import json
 from typing import Any, Literal
 
 from .types import (
-    Alert,
     ActionStatus,
+    Alert,
     CameraLayout,
     DaemonStatus,
     ImuSample,
@@ -357,6 +357,7 @@ def encode(frame: dict[str, Any]) -> str:
 Inbound = (
     RobotInfo
     | Telemetry
+    | Alert
     | CameraLayout
     | DaemonStatus
     | ActionStatus
@@ -446,10 +447,10 @@ __all__ = [
     "control_reset",
     "decode",
     "encode",
+    "frame",
     "link",
     "navigation",
     "policy_stream",
-    "frame",
     "record",
     "sensor_stream",
     "video_bitrate",

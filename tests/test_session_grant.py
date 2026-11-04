@@ -1,7 +1,6 @@
 """The V1 robot-session grant rides in `ready`, and a fixed DTLS certificate lets a grant be bound to the
 connection's fingerprint before the peer connection exists (what the browser app does; the gateway's
 session_grant.verify compares the `fp` claim with the SDP answer's fingerprint)."""
-import asyncio
 import re
 
 import pytest
@@ -16,7 +15,7 @@ def _readies(side):
 
 @pytest.mark.asyncio
 async def test_ready_carries_the_grant_from_a_string_or_a_provider():
-    operator, robot_side = loopback_pair()
+    operator, _robot_side = loopback_pair()
     teleop = RemoteTeleop(operator, grant="grant-1")
     teleop._send_ready()
     assert _readies(operator)[-1]["grant"] == "grant-1"

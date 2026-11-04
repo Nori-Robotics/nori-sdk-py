@@ -2,8 +2,8 @@
 so the gateway mints a token per session and only honours messages that echo it."""
 import asyncio
 
-from nori_sdk.signaling import IcePayload, SdpPayload
 from nori_sdk.mock.loopback import LoopbackSignaling
+from nori_sdk.signaling import IcePayload, SdpPayload
 
 
 def test_ice_wire_carries_the_token_only_when_set():

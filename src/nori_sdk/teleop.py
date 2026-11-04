@@ -54,8 +54,8 @@ from .signaling import (
     SignalingTransport,
 )
 from .types import (
-    Alert,
     ActionStatus,
+    Alert,
     CameraLayout,
     ConnectStatus,
     DaemonStatus,
@@ -359,7 +359,7 @@ class RemoteTeleop:
         return self._info
 
     @property
-    def alerts(self) -> dict[str, "Alert"]:
+    def alerts(self) -> dict[str, Alert]:
         """The latest operator alert per code (state, kept until the robot clears it). A script
         reads `alerts.get("task_jog_limit")`: active means the named arm's Cartesian jog has no
         IK solution at the held orientation, which is why it stopped short."""
@@ -1479,7 +1479,7 @@ class RemoteTeleop:
             # aiortc (1.15) generates a certificate per RTCPeerConnection in __init__ and offers no
             # configuration hook; the list is only READ when the DTLS transport is created (on the
             # remote description), so replacing it here makes every answer carry our fingerprint.
-            pc._RTCPeerConnection__certificates = [self._certificate]
+            pc._RTCPeerConnection__certificates = [self._certificate]  # type: ignore[attr-defined]
         self._pc = pc
         self._remote_set = False
 

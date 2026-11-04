@@ -412,6 +412,7 @@ def test_alerts_are_kept_per_code_until_the_robot_clears_them():
     """The gateway's `task_jog_limit` alert is the only wire signal for 'no IK solution here'; a script reads
     `alerts` to tell that case from a joint limit (`telemetry.stalled`) and from contact (`telemetry.currents`)."""
     import json
+
     from nori_sdk.teleop import RemoteTeleop
     s = RemoteTeleop.__new__(RemoteTeleop)
     s._alerts = {}; s._telemetry = None; s._log = lambda *a, **k: None; s._listeners = {}
