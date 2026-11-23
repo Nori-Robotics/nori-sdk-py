@@ -273,7 +273,11 @@ def test_the_destructive_verb_set_matches_what_the_spec_says_destroys_data():
 
 def test_every_record_verb_builds_a_valid_frame():
     for action in protocol.RecordVerb.__args__:
-        assert_valid(protocol.record(action))
+        # Keep/Reject resolve a specific pending episode; other verbs need no ID.
+        extra = {}
+        if action in {"episode_keep", "episode_reject"}:
+            extra["episode_id"] = "f8749688-86b0-4316-8fa3-66f609b112cc"
+        assert_valid(protocol.record(action, **extra))
 
 
 REQUEST_ID = "f4283fa1-5a3b-4295-99d5-3f6baf87b04d"
