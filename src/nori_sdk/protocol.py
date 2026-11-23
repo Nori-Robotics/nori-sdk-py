@@ -123,6 +123,10 @@ RecordVerb = Literal[
     "stop",
     "discard",
     "discard_last",
+    # Opt-in L3 review; Keep/Reject require an episode_id.
+    "review_status",
+    "episode_keep",
+    "episode_reject",
 ]
 
 # The verbs that delete recorded data. `discard` is deliberately absent: it destroys on L2 and
